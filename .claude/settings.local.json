@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.pyenv/versions/3.12.9/bin/python -m venv .venv)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(PYTHONPATH=. .venv/bin/pytest:*)",
+      "Bash(PYTHONPATH=. /Users/soni/Documents/workspace/Artha/.venv/bin/pytest tests/unit/ -q)",
+      "Bash(PYTHONPATH=. .venv/bin/python:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(~/.pyenv/shims/python3.12 --version)",
+      "Bash(~/.pyenv/shims/python3.12 -c \"import pdfplumber; print\\('pdfplumber ok'\\)\")",
+      "Bash(~/.pyenv/shims/python3.12 -m pip install pdfplumber structlog)",
+      "Bash(~/.pyenv/shims/python3.12:*)",
+      "Bash(python:*)",
+      "Bash(.venv/bin/python -c \"import camelot; print\\('camelot ok'\\)\")",
+      "Bash(.venv/bin/python -c \"import pdfplumber; print\\('pdfplumber ok'\\)\")",
+      "Bash(.venv/bin/python:*)",
+      "Bash(./.venv/bin/pytest tests/unit/ -v --tb=short)"
+    ]
+  }
+}
