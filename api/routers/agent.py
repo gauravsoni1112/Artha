@@ -1,13 +1,16 @@
 """
-Agent router — Phase 2 Single-Agent Assistant.
+Agent router — Phase 3 Multi-Step Reasoning Agent.
 
 Endpoints:
   POST /agent/chat   — send a natural language question, get an AI answer
+                       with structured reasoning (confidence, reasoning_steps,
+                       supporting_data).
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,6 +21,7 @@ from api.database import get_session
 from api.rate_limit import limiter
 from services.agent.agent import ArthaAgent
 from services.agent.config import LLMConfig
+from services.agent.schemas import AgentAnswer
 
 log = structlog.get_logger(__name__)
 
@@ -39,6 +43,10 @@ class ChatResponse(BaseModel):
     tool_calls: list[str]
     session_id: uuid.UUID
     run_id: uuid.UUID
+    # Phase 3 — structured reasoning fields
+    confidence: float = Field(default=1.0, description="Answer confidence score 0–1")
+    reasoning_steps: list[str] = Field(default_factory=list, description="Chain-of-thought steps")
+    supporting_data: list[dict[str, Any]] = Field(default_factory=list, description="Data points cited")
 
 
 # ── Route ─────────────────────────────────────────────────────────────────────
@@ -75,10 +83,18 @@ async def chat(
         log.error("agent.chat.error", error=str(exc), owner_id=str(body.owner_id))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
 
+    # Build structured answer from raw agent result
+    structured = AgentAnswer.from_agent_result(
+        response=result["response"],
+        scratchpad=result.get("scratchpad"),
+        confidence_score=result.get("confidence_score"),
+    )
+
     log.info(
         "agent.chat.complete",
         owner_id=str(body.owner_id),
         tool_calls=result["tool_calls"],
+        confidence=structured.confidence,
         session_id=result.get("session_id"),
         run_id=result.get("run_id"),
     )
@@ -90,4 +106,7 @@ async def chat(
         tool_calls=result["tool_calls"],
         session_id=uuid.UUID(result["session_id"]),
         run_id=uuid.UUID(result["run_id"]),
+        confidence=structured.confidence,
+        reasoning_steps=structured.reasoning_steps,
+        supporting_data=structured.supporting_data,
     )

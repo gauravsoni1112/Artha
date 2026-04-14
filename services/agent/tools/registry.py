@@ -23,6 +23,9 @@ from services.agent.tools.net_worth import run as net_worth_run
 from services.agent.tools.portfolio_value import run as portfolio_value_run
 from services.agent.tools.tax_summary import run as tax_summary_run
 from services.agent.tools.upcoming_expenses import run as upcoming_expenses_run
+from services.agent.tools.spending_trend import run as spending_trend_run
+from services.agent.tools.budget_comparison import run as budget_comparison_run
+from services.agent.tools.goal_progress import run as goal_progress_run
 
 
 # ── Input schemas (used by LangGraph for JSON schema extraction) ───────────────
@@ -62,6 +65,24 @@ class UpcomingExpensesInput(BaseModel):
     lookahead_days: int = Field(30, description="Days ahead to predict recurring expenses")
 
 
+class SpendingTrendInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    category: str | None = Field(None, description="Category to trend e.g. GROCERIES; omit for all")
+    months: int = Field(6, description="Number of months to include (default 6)")
+
+
+class BudgetComparisonInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    start_date: str | None = Field(None, description="Start date YYYY-MM-DD")
+    end_date: str | None = Field(None, description="End date YYYY-MM-DD")
+    fiscal_year: str | None = Field(None, description="Fiscal year e.g. 2024-25")
+
+
+class GoalProgressInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    goal_name: str | None = Field(None, description="Partial goal name filter; omit for all goals")
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 ToolFn = Callable[..., Coroutine[Any, Any, ToolResult]]
@@ -73,6 +94,10 @@ TOOL_REGISTRY: dict[str, tuple[ToolFn, type[BaseModel]]] = {
     "portfolio_value": (portfolio_value_run, PortfolioValueInput),
     "tax_summary": (tax_summary_run, TaxSummaryInput),
     "upcoming_expenses": (upcoming_expenses_run, UpcomingExpensesInput),
+    # Phase 3
+    "spending_trend": (spending_trend_run, SpendingTrendInput),
+    "budget_comparison": (budget_comparison_run, BudgetComparisonInput),
+    "goal_progress": (goal_progress_run, GoalProgressInput),
 }
 
 

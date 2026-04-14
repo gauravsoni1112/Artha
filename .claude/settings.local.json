@@ -26,7 +26,13 @@
       "Bash(ls -1 tests/unit/agent/*.py)",
       "Bash(cat tests/unit/agent/*.py)",
       "Bash(pip show:*)",
-      "Bash(/Users/soni/Documents/workspace/Artha/.venv/bin/python:*)"
+      "Bash(/Users/soni/Documents/workspace/Artha/.venv/bin/python:*)",
+      "Bash(pytest:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(alembic current:*)",
+      "Bash(grep:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

@@ -23,12 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from libs.schemas.db_models import (
     Account,
+    Document,
     IngestionRun,
     Owner,
     Transaction,
     TransactionQuarantine,
 )
-from libs.schemas.enums import AccountType, DocumentType, IngestionSource
+from libs.schemas.enums import AccountType, DocumentType, IngestionRunStatus, IngestionSource
 from services.ingestion.connectors.base import FetchedDocument
 from services.ingestion.ingestion_service import IngestionService
 from services.storage.file_store import FileStore
@@ -266,3 +267,302 @@ async def test_idempotent_source_hash(db_session, owner_and_account, ingestion_s
         )
     )
     assert len(rows.all()) == 1
+
+
+# ── Tests: Gmail Connector Integration ────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gmail_connector_integration_happy_path(db_session, owner_and_account, ingestion_service, sample_bank_pdf_bytes):
+    """Gmail-sourced PDF should ingest successfully through full pipeline."""
+    from services.ingestion.connectors.base import FetchedDocument
+
+    owner, account = owner_and_account
+
+    # Use proper minimal valid PDF from fixture
+    pdf_bytes = sample_bank_pdf_bytes
+
+    fetched = FetchedDocument(
+        raw_bytes=pdf_bytes,
+        doc_type=DocumentType.BANK_STATEMENT,
+        source=IngestionSource.GMAIL,
+        account_id=account.id,
+        suggested_filename="hdfc_statement_jun_2024.pdf",
+        metadata={"gmail_message_id": "mock_msg_123"},
+    )
+
+    # Ingest should complete, though parsing may fail (no real PDF)
+    # The document should be persisted and marked for parsing
+    result = await ingestion_service.run(owner.id, fetched)
+
+    assert result.run_id is not None
+    assert result.status in (IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL, "PARTIAL")
+
+    # Document should exist in DB
+    doc = await db_session.scalar(
+        select(Document).where(Document.owner_id == owner.id)
+    )
+    assert doc is not None
+    assert doc.source == IngestionSource.GMAIL
+    assert doc.doc_type == DocumentType.BANK_STATEMENT
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_gmail_connector_multiple_documents(db_session, owner_and_account, ingestion_service, sample_bank_pdf_bytes):
+    """Multiple Gmail documents should ingest independently."""
+    from services.ingestion.connectors.base import FetchedDocument
+
+    owner, account = owner_and_account
+
+    # Create two different PDFs to avoid deduplication
+    # Modify the stream slightly to have different file hashes
+    pdf_bytes_1 = sample_bank_pdf_bytes.replace(b"Mock Bank Statement", b"HDFC June 2024")
+    pdf_bytes_2 = sample_bank_pdf_bytes.replace(b"Mock Bank Statement", b"HDFC July 2024")
+
+    # Ingest two bank statements with different content
+    fetched1 = FetchedDocument(
+        raw_bytes=pdf_bytes_1,
+        doc_type=DocumentType.BANK_STATEMENT,
+        source=IngestionSource.GMAIL,
+        account_id=account.id,
+        suggested_filename="hdfc_jun.pdf",
+    )
+
+    fetched2 = FetchedDocument(
+        raw_bytes=pdf_bytes_2,
+        doc_type=DocumentType.BANK_STATEMENT,
+        source=IngestionSource.GMAIL,
+        account_id=account.id,
+        suggested_filename="hdfc_july.pdf",
+    )
+
+    result1 = await ingestion_service.run(owner.id, fetched1)
+    result2 = await ingestion_service.run(owner.id, fetched2)
+
+    # Both should complete
+    assert result1.run_id is not None
+    assert result2.run_id is not None
+    assert result1.run_id != result2.run_id
+
+    # Both documents should exist
+    docs = await db_session.scalars(
+        select(Document).where(
+            Document.owner_id == owner.id,
+            Document.source == IngestionSource.GMAIL,
+        )
+    )
+    assert len(docs.all()) == 2
+
+
+# ── Tests: Zerodha Connector Integration ──────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_zerodha_connector_integration_holdings(db_session, owner_and_account, ingestion_service):
+    """Zerodha holdings payload should ingest successfully."""
+    from services.ingestion.connectors.base import FetchedDocument
+
+    owner, account = owner_and_account
+
+    # Simulate holdings response
+    holdings_payload = json.dumps([
+        {
+            "date": date.today().isoformat(),
+            "description": "Holding: INFY (NSE)",
+            "amount": "15005.00",
+            "type": "CREDIT",
+            "category": "INVESTMENT",
+            "merchant": "Zerodha",
+            "extra": {
+                "isin": "INE009A01021",
+                "quantity": 10,
+                "last_price": 1500.50,
+            },
+        }
+    ]).encode()
+
+    fetched = FetchedDocument(
+        raw_bytes=holdings_payload,
+        doc_type=DocumentType.OTHER,
+        source=IngestionSource.ZERODHA_API,
+        account_id=account.id,
+        suggested_filename="zerodha_holdings_2024-06-15.json",
+    )
+
+    result = await ingestion_service.run(owner.id, fetched)
+
+    assert result.status in (IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL, "SUCCESS", "PARTIAL")
+    assert result.records_fetched == 1
+
+    # Transaction should be created
+    tx = await db_session.scalar(
+        select(Transaction).where(
+            Transaction.owner_id == owner.id,
+            Transaction.description.like("%INFY%"),
+        )
+    )
+    assert tx is not None
+    assert tx.amount_paise == int(15005.00 * 100)  # 1500500 paise (quantity * price)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_zerodha_connector_integration_trades(db_session, owner_and_account, ingestion_service):
+    """Zerodha trade history payload should ingest successfully."""
+    from services.ingestion.connectors.base import FetchedDocument
+
+    owner, account = owner_and_account
+
+    # Simulate trades response
+    trades_payload = json.dumps([
+        {
+            "date": date.today().isoformat(),
+            "description": "Trade: INFY BUY",
+            "amount": "14500.00",
+            "type": "DEBIT",
+            "category": "INVESTMENT",
+            "merchant": "Zerodha",
+        }
+    ]).encode()
+
+    fetched = FetchedDocument(
+        raw_bytes=trades_payload,
+        doc_type=DocumentType.OTHER,
+        source=IngestionSource.ZERODHA_API,
+        account_id=account.id,
+        suggested_filename="zerodha_trades_2024-06-15.json",
+    )
+
+    result = await ingestion_service.run(owner.id, fetched)
+
+    assert result.status in (IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL, "SUCCESS", "PARTIAL")
+    assert result.records_fetched == 1
+
+    # Transaction should be created
+    tx = await db_session.scalar(
+        select(Transaction).where(
+            Transaction.owner_id == owner.id,
+            Transaction.description.like("%INFY%"),
+        )
+    )
+    assert tx is not None
+
+
+# ── Tests: Multi-source ingestion ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_multi_source_ingest_single_run(db_session, owner_and_account, ingestion_service):
+    """Multiple sources (Manual + Zerodha) should ingest in single run."""
+    from services.ingestion.connectors.base import FetchedDocument
+
+    owner, account = owner_and_account
+
+    # Manual: insurance payment
+    manual_payload = json.dumps({
+        "transactions": [
+            {
+                "date": "15/06/2024",
+                "description": "Insurance Premium",
+                "amount": "5000.00",
+                "type": "DEBIT",
+                "category": "INSURANCE",
+            }
+        ]
+    }).encode()
+
+    # Zerodha: holding
+    zerodha_payload = json.dumps([
+        {
+            "date": date.today().isoformat(),
+            "description": "Holding: TCS (NSE)",
+            "amount": "19000.00",
+            "type": "CREDIT",
+            "category": "INVESTMENT",
+            "merchant": "Zerodha",
+        }
+    ]).encode()
+
+    manual_doc = FetchedDocument(
+        raw_bytes=manual_payload,
+        doc_type=DocumentType.INSURANCE,
+        source=IngestionSource.MANUAL,
+        account_id=account.id,
+    )
+
+    zerodha_doc = FetchedDocument(
+        raw_bytes=zerodha_payload,
+        doc_type=DocumentType.OTHER,
+        source=IngestionSource.ZERODHA_API,
+        account_id=account.id,
+    )
+
+    result1 = await ingestion_service.run(owner.id, manual_doc)
+    result2 = await ingestion_service.run(owner.id, zerodha_doc)
+
+    assert result1.status in (IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL, "SUCCESS", "PARTIAL")
+    assert result2.status in (IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL, "SUCCESS", "PARTIAL")
+
+    # Both transactions should exist
+    txs = await db_session.scalars(
+        select(Transaction).where(Transaction.owner_id == owner.id)
+    )
+    assert len(txs.all()) >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_duplicate_across_sources(db_session, owner_and_account, ingestion_service):
+    """Same transaction from different sources should be idempotent."""
+    from services.ingestion.connectors.base import FetchedDocument
+
+    owner, account = owner_and_account
+
+    # Same transaction via Manual and Zerodha (different source_hash due to different ingestion runs)
+    # But same logical data
+    payload1 = json.dumps({
+        "transactions": [
+            {
+                "date": "10/06/2024",
+                "description": "Same Transaction",
+                "amount": "1000.00",
+                "type": "DEBIT",
+            }
+        ]
+    }).encode()
+
+    payload2 = json.dumps([
+        {
+            "date": "10/06/2024",
+            "description": "Same Transaction",
+            "amount": "1000.00",
+            "type": "DEBIT",
+        }
+    ]).encode()
+
+    doc1 = FetchedDocument(
+        raw_bytes=payload1,
+        doc_type=DocumentType.OTHER,
+        source=IngestionSource.MANUAL,
+        account_id=account.id,
+    )
+
+    doc2 = FetchedDocument(
+        raw_bytes=payload2,
+        doc_type=DocumentType.OTHER,
+        source=IngestionSource.ZERODHA_API,
+        account_id=account.id,
+    )
+
+    await ingestion_service.run(owner.id, doc1)
+    await ingestion_service.run(owner.id, doc2)
+
+    # Should have 1 transaction (same source_hash)
+    txs = await db_session.scalars(
+        select(Transaction).where(
+            Transaction.owner_id == owner.id,
+            Transaction.description == "Same Transaction",
+        )
+    )
+    assert len(txs.all()) == 1

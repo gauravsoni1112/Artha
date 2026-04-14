@@ -1,16 +1,18 @@
 """
-Phase 2 — Single-Agent Assistant (LangGraph).
+Phase 3 — Multi-Step Reasoning Agent (LangGraph).
 
-Graph topology (single node, expandable in Phase 3):
+Graph topology:
 
-  START → assistant → [tool_node] → assistant → END
+  START → planner → executor_loop → END
 
-The assistant node calls the LLM with bound tools. If the LLM emits a
-tool_call, LangGraph routes to ToolNode which executes the tool and
-returns the observation back to the assistant. This continues until
-the LLM emits a plain text message (no tool calls).
+- planner: decomposes the user question into an ordered Plan (list of steps).
+- executor_loop: iterates over plan steps, running the assistant↔tools
+  sub-graph per step, collecting observations, then synthesises a final answer.
 
-State schema: MessagesState (list of LangChain messages).
+The assistant↔tools inner loop is unchanged from Phase 2:
+  assistant → [tool_node] → assistant → (repeat until no tool calls)
+
+State schema: PlanState (extends MessagesState with plan + step observations).
 """
 
 from __future__ import annotations
@@ -21,23 +23,37 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import MessagesState
 from langgraph.prebuilt import ToolNode
 from sqlalchemy import select, func as sqlfunc
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import TypedDict
 
 from libs.schemas.db_models import AgentRun, ChatSession
 from libs.telemetry.tracing import start_span
 from services.agent.config import LLMConfig
+from services.agent.context import compact_messages
+from services.agent.planner import Plan, PlannerNode
+from services.agent.reflection import ReflectionNode
 from services.agent.tools.registry import build_langchain_tools
 
 log = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT = """\
 You are Artha, a personal finance assistant for Indian users.
-You have access to the user's financial data via tools. Always:
+You have access to the user's financial data via tools.
+
+Reasoning protocol — follow this format for every response:
+  Thought: <brief reasoning about what you need and why>
+  Action: <tool name> or "Final Answer"
+  Observation: <tool result summary, written after you receive it>
+  ... (repeat Thought/Action/Observation as needed)
+  Thought: I now have enough information to answer.
+  Final Answer: <your response to the user>
+
+Additional rules:
 - Use tools to retrieve real data before answering — never guess amounts.
 - Express all amounts in Indian Rupee format (₹X,XX,XXX.XX).
 - Reference the fiscal year (April–March) when discussing annual figures.
@@ -65,12 +81,14 @@ class ArthaAgent:
         tools = build_langchain_tools(self._session)
         llm = self._config.build_chat_model()
         llm_with_tools = llm.bind_tools(tools)
-
         tool_node = ToolNode(tools)
+        self._recursion_limit = int(os.getenv("AGENT_MAX_ITERATIONS", "10"))
+        self._planner = PlannerNode(llm=llm)
+        self._reflector = ReflectionNode(llm=llm)
 
+        # ── inner assistant↔tools loop (unchanged from Phase 2) ──────────
         def assistant(state: MessagesState) -> dict:
             messages = state["messages"]
-            # Prepend system prompt on first call only
             if not any(isinstance(m, SystemMessage) for m in messages):
                 messages = [SystemMessage(content=_SYSTEM_PROMPT)] + messages
             response = llm_with_tools.invoke(messages)
@@ -82,15 +100,97 @@ class ArthaAgent:
                 return "tools"
             return END
 
-        graph = StateGraph(MessagesState)
-        graph.add_node("assistant", assistant)
-        graph.add_node("tools", tool_node)
+        inner = StateGraph(MessagesState)
+        inner.add_node("assistant", assistant)
+        inner.add_node("tools", tool_node)
+        inner.add_edge(START, "assistant")
+        inner.add_conditional_edges("assistant", should_continue, {"tools": "tools", END: END})
+        inner.add_edge("tools", "assistant")
+        inner_graph = inner.compile()
 
-        graph.add_edge(START, "assistant")
-        graph.add_conditional_edges("assistant", should_continue, {"tools": "tools", END: END})
-        graph.add_edge("tools", "assistant")
+        # ── PlanState — outer graph state ─────────────────────────────────
+        class PlanState(TypedDict):
+            messages: list
+            plan: Plan | None
+            step_observations: list[str]   # one entry per executed plan step
+            confidence_score: float | None
+            reflection_notes: str | None
+            needs_rerun: bool
+            reflect_count: int
 
-        self._recursion_limit = int(os.getenv("AGENT_MAX_ITERATIONS", "10"))
+        # ── planner node ──────────────────────────────────────────────────
+        async def planner_node(state: PlanState) -> dict:
+            result = await self._planner.acall(state)
+            return {"plan": result["plan"], "step_observations": []}
+
+        # ── executor_loop node ────────────────────────────────────────────
+        async def executor_loop(state: PlanState) -> dict:
+            plan: Plan = state["plan"]
+            original_messages = state["messages"]
+            observations: list[str] = list(state.get("step_observations") or [])
+
+            # Extract owner_id token from the first human message
+            owner_token = ""
+            for m in original_messages:
+                if isinstance(m, HumanMessage):
+                    content = m.content
+                    if content.startswith("[owner_id="):
+                        owner_token = content.split("]")[0] + "] "
+                    break
+
+            # Execute each plan step through the inner assistant↔tools loop
+            for step in plan.steps:
+                step_question = f"{owner_token}{step}"
+                step_state = {"messages": [HumanMessage(content=step_question)]}
+                step_result = await inner_graph.ainvoke(
+                    step_state,
+                    config={"recursion_limit": self._recursion_limit},
+                )
+                last = step_result["messages"][-1]
+                obs = last.content if hasattr(last, "content") else str(last)
+                observations.append(f"[Step: {step}]\n{obs}")
+                log.debug("executor_loop.step_done", step=step, obs_len=len(obs))
+
+            # If multi-step, synthesise a final answer from all observations
+            if len(plan.steps) > 1:
+                synthesis_prompt = (
+                    f"{owner_token}Based on the following step-by-step observations, "
+                    "provide a concise final answer to the original question.\n\n"
+                    + "\n\n".join(observations)
+                    + f"\n\nOriginal question: {original_messages[-1].content if original_messages else ''}"
+                )
+                synth_state = {"messages": [HumanMessage(content=synthesis_prompt)]}
+                synth_result = await inner_graph.ainvoke(
+                    synth_state,
+                    config={"recursion_limit": self._recursion_limit},
+                )
+                final_messages = list(original_messages) + synth_result["messages"]
+            else:
+                # Single step — use inner graph messages directly
+                final_messages = list(original_messages) + step_result["messages"]  # type: ignore[possibly-undefined]
+
+            return {"messages": final_messages, "step_observations": observations}
+
+        # ── reflection node ───────────────────────────────────────────────
+        async def reflect_node(state: PlanState) -> dict:
+            return await self._reflector.acall(state)
+
+        def after_reflect(state) -> str:
+            """Route back to executor if low confidence and iterations remain."""
+            if state.get("needs_rerun"):
+                return "executor_loop"
+            return END
+
+        # ── outer graph ───────────────────────────────────────────────────
+        graph = StateGraph(PlanState)
+        graph.add_node("planner", planner_node)
+        graph.add_node("executor_loop", executor_loop)
+        graph.add_node("reflect", reflect_node)
+        graph.add_edge(START, "planner")
+        graph.add_edge("planner", "executor_loop")
+        graph.add_edge("executor_loop", "reflect")
+        graph.add_conditional_edges("reflect", after_reflect, {"executor_loop": "executor_loop", END: END})
+
         return graph.compile()
 
     async def chat(self, owner_id: str, message: str, session_id: str | None = None) -> dict[str, Any]:
@@ -104,11 +204,13 @@ class ArthaAgent:
 
         Returns:
             {
-                "response": str,          # final LLM answer
-                "tool_calls": list[str],  # names of tools invoked
-                "messages": list,         # full message trace (for debugging)
-                "session_id": str,        # UUID of the session
-                "run_id": str,            # UUID of this agent run
+                "response": str,               # final LLM answer
+                "tool_calls": list[str],       # names of tools invoked
+                "messages": list,              # full message trace (for debugging)
+                "session_id": str,             # UUID of the session
+                "run_id": str,                 # UUID of this agent run
+                "plan": Plan | None,           # decomposed plan (Phase 3)
+                "step_observations": list[str] # per-step answers (Phase 3)
             }
         """
         started_at = datetime.now(timezone.utc)
@@ -119,7 +221,23 @@ class ArthaAgent:
             # Inject owner_id into the message so tools can use it without exposing
             # it to the LLM as a separate field.
             augmented = f"[owner_id={owner_id}] {message}"
-            initial_state = {"messages": [HumanMessage(content=augmented)]}
+
+            # Load prior session messages for multi-turn context + compact if needed
+            prior_messages, new_summary = await self._load_and_compact_context(
+                session_id=session_id,
+                llm=self._planner._llm,
+            )
+
+            initial_messages = prior_messages + [HumanMessage(content=augmented)]
+            initial_state = {
+                "messages": initial_messages,
+                "plan": None,
+                "step_observations": [],
+                "confidence_score": None,
+                "reflection_notes": None,
+                "needs_rerun": False,
+                "reflect_count": 0,
+            }
 
             result = await self._graph.ainvoke(
                 initial_state,
@@ -127,6 +245,11 @@ class ArthaAgent:
             )
 
             messages = result["messages"]
+            plan: Plan | None = result.get("plan")
+            step_observations: list[str] = result.get("step_observations") or []
+            confidence_score: float | None = result.get("confidence_score")
+            reflection_notes: str | None = result.get("reflection_notes")
+
             final_msg = messages[-1]
             response_text = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
 
@@ -138,11 +261,14 @@ class ArthaAgent:
             ]
 
             messages_trace = [m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages]
+            scratchpad = self._extract_scratchpad(messages)
 
             log.info(
                 "agent.graph.complete",
                 owner_id=owner_id,
                 tool_calls=tool_calls,
+                plan_steps=len(plan.steps) if plan else 1,
+                confidence=confidence_score,
                 response_len=len(response_text),
             )
 
@@ -154,6 +280,10 @@ class ArthaAgent:
             response_text=response_text,
             tool_calls=tool_calls,
             messages_trace=messages_trace,
+            scratchpad=scratchpad,
+            confidence_score=confidence_score,
+            reflection_notes=reflection_notes,
+            context_summary=new_summary,
             started_at=started_at,
         )
 
@@ -161,9 +291,101 @@ class ArthaAgent:
             "response": response_text,
             "tool_calls": tool_calls,
             "messages": messages_trace,
+            "scratchpad": scratchpad,
             "session_id": sess_id,
             "run_id": run_id,
+            "plan": plan,
+            "step_observations": step_observations,
+            "confidence_score": confidence_score,
+            "reflection_notes": reflection_notes,
         }
+
+    async def _load_and_compact_context(
+        self,
+        session_id: str | None,
+        llm: Any,
+    ) -> tuple[list, str | None]:
+        """
+        Load prior conversation messages from session history and compact if needed.
+
+        For Phase 3, we keep this lightweight: if session_id is provided and the
+        session has a stored summary, we inject it as a SystemMessage prefix.
+        Full message replay from DB is reserved for a future turn; here we use
+        the stored summary as the prior context token.
+
+        Returns:
+            (prior_messages, new_summary | None)
+        """
+        if not session_id:
+            return [], None
+
+        try:
+            sess_uuid = uuid.UUID(session_id)
+            chat_session = await self._session.get(ChatSession, sess_uuid)
+            if chat_session is None:
+                return [], None
+
+            prior: list = []
+            if chat_session.summary:
+                prior = [SystemMessage(content=f"[Prior conversation summary]\n{chat_session.summary}")]
+
+            # compact_messages only triggers if we exceed threshold; with just a
+            # summary SystemMessage it won't trigger — that's the intended behaviour.
+            compacted, new_summary = await compact_messages(prior, llm, chat_session.summary)
+            return compacted, new_summary
+        except Exception as exc:
+            log.warning("agent.context.load_failed", error=str(exc))
+            return [], None
+
+    @staticmethod
+    def _extract_scratchpad(messages: list) -> list[dict]:
+        """
+        Parse Thought:/Action:/Observation: blocks from AI message content.
+
+        Returns a list of step dicts, e.g.:
+            [{"thought": "I need to query...", "action": "transaction_query", "observation": "..."}]
+
+        Only AI messages (those with a ``content`` str) are scanned.
+        Tool messages provide the observation for the preceding action.
+        """
+        steps: list[dict] = []
+        current: dict = {}
+
+        for msg in messages:
+            content = getattr(msg, "content", None)
+            if not isinstance(content, str):
+                continue
+
+            msg_type = type(msg).__name__.lower()  # humanmessage / aimessage / toolmessage
+
+            if "aimessage" in msg_type or "ai" in msg_type:
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.lower().startswith("thought:"):
+                        # Start a new step
+                        if current:
+                            steps.append(current)
+                        current = {"thought": stripped[len("thought:"):].strip()}
+                    elif stripped.lower().startswith("action:"):
+                        current["action"] = stripped[len("action:"):].strip()
+                    elif stripped.lower().startswith("observation:"):
+                        current["observation"] = stripped[len("observation:"):].strip()
+                        steps.append(current)
+                        current = {}
+                    elif stripped.lower().startswith("final answer:"):
+                        current["final_answer"] = stripped[len("final answer:"):].strip()
+
+            elif "toolmessage" in msg_type or "tool" in msg_type:
+                # Tool result provides the observation for the last open step
+                if current and "observation" not in current:
+                    current["observation"] = content[:500]  # cap length
+                    steps.append(current)
+                    current = {}
+
+        if current:
+            steps.append(current)
+
+        return steps
 
     async def _persist_run(
         self,
@@ -173,6 +395,10 @@ class ArthaAgent:
         response_text: str,
         tool_calls: list[str],
         messages_trace: list,
+        scratchpad: list[dict],
+        confidence_score: float | None,
+        reflection_notes: str | None,
+        context_summary: str | None,
         started_at: datetime,
     ) -> tuple[str, str]:
         """
@@ -193,6 +419,9 @@ class ArthaAgent:
             # Count existing turns to set turn_index
             count_stmt = select(sqlfunc.count()).select_from(AgentRun).where(AgentRun.session_id == sess_uuid)
             turn_index = (await self._session.scalar(count_stmt)) or 0
+            # Persist compaction summary if produced this turn
+            if context_summary:
+                chat_session.summary = context_summary
         else:
             # Create new session from first message
             chat_session = ChatSession(
@@ -212,6 +441,9 @@ class ArthaAgent:
             assistant_response=response_text,
             tool_calls=tool_calls,
             messages_trace=messages_trace,
+            scratchpad=scratchpad or None,
+            confidence_score=confidence_score,
+            reflection_notes=reflection_notes,
             turn_index=turn_index,
             status="OK",
             error_message=None,

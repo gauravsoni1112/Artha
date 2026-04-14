@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -308,6 +309,8 @@ class ChatSession(Base):
     )
     title: Mapped[str | None] = mapped_column(Text, nullable=True)  # first 80 chars of first message
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")  # ACTIVE | CLOSED
+    # Phase 3: summary of earlier turns written by context compaction
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -337,6 +340,11 @@ class AgentRun(Base):
     assistant_response: Mapped[str] = mapped_column(Text, nullable=False)
     tool_calls: Mapped[list] = mapped_column(JSONB, nullable=False)  # list of tool names invoked
     messages_trace: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # full LangGraph trace
+    # Phase 3: ReAct chain-of-thought — list of {"thought": str, "action": str} dicts
+    scratchpad: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Phase 3: planner + reflection outputs
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reflection_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     turn_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="OK")  # OK | ERROR
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
