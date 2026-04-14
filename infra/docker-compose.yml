@@ -1,6 +1,52 @@
 version: "3.9"
 
+# ── Network topology ───────────────────────────────────────────────────────────
+#
+#  artha_registry_net   api ↔ agents
+#    - Agents self-register with api on startup (PUT /registry/agents)
+#    - api dispatches queries to agent /run endpoints (POST /router/query)
+#    - Agents are NOT on each other's dedicated networks; no agent calls another
+#      agent directly — all routing flows through api.
+#
+#  artha_data_net       agents + api ↔ postgres / redis / ollama / observability
+#    - All containers that need DB, cache, LLM, or tracing live here.
+#
+networks:
+  artha_registry_net:
+    driver: bridge
+  artha_data_net:
+    driver: bridge
+
+
+# ── Shared env fragments ───────────────────────────────────────────────────────
+x-db-env: &db-env
+  DATABASE_URL: postgresql+asyncpg://artha:artha_secret@postgres:5432/artha
+
+x-redis-env: &redis-env
+  REDIS_URL: redis://redis:6379
+
+x-llm-env: &llm-env
+  LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+  LLM_MODEL: ${LLM_MODEL:-llama3.2}
+  LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+
+x-tracing-env: &tracing-env
+  OTLP_ENDPOINT: http://jaeger:4317
+
+x-agent-tune-env: &agent-tune-env
+  REFLECTION_THRESHOLD: ${REFLECTION_THRESHOLD:-0.7}
+  MAX_REFLECT_ITERATIONS: ${MAX_REFLECT_ITERATIONS:-2}
+  CONTEXT_WINDOW_THRESHOLD: ${CONTEXT_WINDOW_THRESHOLD:-20}
+  CONTEXT_WINDOW_KEEP: ${CONTEXT_WINDOW_KEEP:-6}
+  AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-10}
+
+
 services:
+
+  # ── Infrastructure ───────────────────────────────────────────────────────────
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -11,6 +57,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - artha_data_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U artha"]
       interval: 5s
@@ -23,6 +71,8 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - artha_data_net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -37,6 +87,8 @@ services:
       - "4318:4318"     # OTLP HTTP
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - artha_data_net
 
   prometheus:
     image: prom/prometheus:v2.52.0
@@ -47,6 +99,10 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+    networks:
+      - artha_data_net
+    depends_on:
+      - api
 
   grafana:
     image: grafana/grafana:10.4.3
@@ -56,10 +112,210 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: artha_grafana
     volumes:
       - grafana_data:/var/lib/grafana
+    networks:
+      - artha_data_net
     depends_on:
       - prometheus
+
+  # Ollama — shared local LLM (default provider for all agents)
+  # Override with LLM_PROVIDER=anthropic / openai env vars to skip.
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - artha_data_net
+    # Pull the default model on first start
+    # Override LLM_MODEL to use a different model.
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull ${LLM_MODEL:-llama3.2} && wait"]
+
+  # ── API — gateway, ingestion, Phase 3 agent, agent registry, router ──────────
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: artha-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env]
+      FILE_STORE_KEY: ${FILE_STORE_KEY:-tRlwcGp_9Xgkykc4hyrpOpmbK1RRC-Oiolpc3IE2mPU=}
+      GMAIL_CLIENT_SECRETS: ${GMAIL_CLIENT_SECRETS:-}
+      GMAIL_TOKEN_PATH: ${GMAIL_TOKEN_PATH:-}
+      ZERODHA_API_KEY: ${ZERODHA_API_KEY:-}
+      ZERODHA_ACCESS_TOKEN: ${ZERODHA_ACCESS_TOKEN:-}
+    networks:
+      - artha_registry_net
+      - artha_data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ── Domain agents ─────────────────────────────────────────────────────────────
+  # All agents:
+  #   - Register with api on startup (REGISTRY_URL=http://api:8000, retries built-in)
+  #   - Query postgres for tool data (artha_data_net)
+  #   - Use shared Ollama by default; override per-agent via
+  #     <AGENT_ID_UPPER>_LLM_PROVIDER / _MODEL / _BASE_URL / _API_KEY env vars
+
+  cashflow_agent:
+    build:
+      context: ..
+      dockerfile: services/agents/cashflow/Dockerfile
+    image: artha-cashflow-agent:latest
+    ports:
+      - "8001:8001"
+    environment:
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      AGENT_ID: cashflow_agent
+      AGENT_ENDPOINT: http://cashflow_agent:8001
+      AGENT_CAPABILITIES: cashflow,spending,budget
+      REGISTRY_URL: http://api:8000
+      # Per-agent LLM override example (uncomment to use):
+      # CASHFLOW_AGENT_LLM_PROVIDER: anthropic
+      # CASHFLOW_AGENT_LLM_MODEL: claude-haiku-4-5-20251001
+      # CASHFLOW_AGENT_LLM_API_KEY: ${ANTHROPIC_API_KEY}
+    networks:
+      - artha_registry_net
+      - artha_data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  investment_agent:
+    build:
+      context: ..
+      dockerfile: services/agents/investment/Dockerfile
+    image: artha-investment-agent:latest
+    ports:
+      - "8002:8002"
+    environment:
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      AGENT_ID: investment_agent
+      AGENT_ENDPOINT: http://investment_agent:8002
+      AGENT_CAPABILITIES: investment,portfolio,net_worth
+      REGISTRY_URL: http://api:8000
+    networks:
+      - artha_registry_net
+      - artha_data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  tax_agent:
+    build:
+      context: ..
+      dockerfile: services/agents/tax/Dockerfile
+    image: artha-tax-agent:latest
+    ports:
+      - "8003:8003"
+    environment:
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      AGENT_ID: tax_agent
+      AGENT_ENDPOINT: http://tax_agent:8003
+      AGENT_CAPABILITIES: tax,itr,fiscal
+      REGISTRY_URL: http://api:8000
+    networks:
+      - artha_registry_net
+      - artha_data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  risk_agent:
+    build:
+      context: ..
+      dockerfile: services/agents/risk/Dockerfile
+    image: artha-risk-agent:latest
+    ports:
+      - "8004:8004"
+    environment:
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      AGENT_ID: risk_agent
+      AGENT_ENDPOINT: http://risk_agent:8004
+      AGENT_CAPABILITIES: risk,insurance,emergency_fund,debt
+      REGISTRY_URL: http://api:8000
+    networks:
+      - artha_registry_net
+      - artha_data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  goal_agent:
+    build:
+      context: ..
+      dockerfile: services/agents/goal/Dockerfile
+    image: artha-goal-agent:latest
+    ports:
+      - "8005:8005"
+    environment:
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      AGENT_ID: goal_agent
+      AGENT_ENDPOINT: http://goal_agent:8005
+      AGENT_CAPABILITIES: goal,planning,savings
+      REGISTRY_URL: http://api:8000
+    networks:
+      - artha_registry_net
+      - artha_data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 
 volumes:
   postgres_data:
   redis_data:
   grafana_data:
+  ollama_data:

@@ -2,6 +2,17 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: artha
+  # API gateway (within Docker — use service name)
+  - job_name: artha_api
     static_configs:
-      - targets: ["host.docker.internal:8000"]
+      - targets: ["api:8000"]
+
+  # Domain agents
+  - job_name: artha_agents
+    static_configs:
+      - targets:
+          - "cashflow_agent:8001"
+          - "investment_agent:8002"
+          - "tax_agent:8003"
+          - "risk_agent:8004"
+          - "goal_agent:8005"
