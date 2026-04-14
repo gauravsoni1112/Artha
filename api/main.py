@@ -14,7 +14,9 @@ from slowapi.errors import RateLimitExceeded
 
 from api.rate_limit import limiter
 from api.routers.agent import router as agent_router
+from api.routers.agent_router import router as domain_router
 from api.routers.ingestion import ingestion_runs_router, router as ingestion_router
+from api.routers.registry import router as registry_router
 from libs.telemetry.logging import configure_logging
 from libs.telemetry.tracing import configure_tracing
 from services.scheduler.jobs import register_all_jobs
@@ -55,6 +57,8 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(ingestion_router)
 app.include_router(ingestion_runs_router)
 app.include_router(agent_router)
+app.include_router(registry_router)
+app.include_router(domain_router)
 
 
 @app.get("/health")
