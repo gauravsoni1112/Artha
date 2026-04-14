@@ -26,6 +26,11 @@ from services.agent.tools.upcoming_expenses import run as upcoming_expenses_run
 from services.agent.tools.spending_trend import run as spending_trend_run
 from services.agent.tools.budget_comparison import run as budget_comparison_run
 from services.agent.tools.goal_progress import run as goal_progress_run
+# Phase 4 — risk-domain tools
+from services.agent.tools.emergency_fund_months import run as emergency_fund_months_run
+from services.agent.tools.asset_concentration import run as asset_concentration_run
+from services.agent.tools.debt_to_income import run as debt_to_income_run
+from services.agent.tools.insurance_coverage_gap import run as insurance_coverage_gap_run
 
 
 # ── Input schemas (used by LangGraph for JSON schema extraction) ───────────────
@@ -83,6 +88,31 @@ class GoalProgressInput(BaseModel):
     goal_name: str | None = Field(None, description="Partial goal name filter; omit for all goals")
 
 
+class EmergencyFundMonthsInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    expense_months: int = Field(3, description="Number of recent months used to compute avg expense (default 3)")
+
+
+class AssetConcentrationInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    concentration_threshold_pct: float = Field(
+        40.0, description="Flag asset classes above this % of total portfolio (default 40)"
+    )
+
+
+class DebtToIncomeInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    months: int = Field(3, description="Number of recent months to average over (default 3)")
+
+
+class InsuranceCoverageGapInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    annual_income_paise: int = Field(0, description="User's annual gross income in paise (from profile)")
+    is_family_scope: bool = Field(False, description="True if coverage should include dependants")
+    existing_life_cover_paise: int = Field(0, description="Current life insurance sum assured in paise")
+    existing_health_cover_paise: int = Field(0, description="Current health insurance sum insured in paise")
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 ToolFn = Callable[..., Coroutine[Any, Any, ToolResult]]
@@ -98,6 +128,11 @@ TOOL_REGISTRY: dict[str, tuple[ToolFn, type[BaseModel]]] = {
     "spending_trend": (spending_trend_run, SpendingTrendInput),
     "budget_comparison": (budget_comparison_run, BudgetComparisonInput),
     "goal_progress": (goal_progress_run, GoalProgressInput),
+    # Phase 4 — risk domain
+    "emergency_fund_months": (emergency_fund_months_run, EmergencyFundMonthsInput),
+    "asset_concentration": (asset_concentration_run, AssetConcentrationInput),
+    "debt_to_income": (debt_to_income_run, DebtToIncomeInput),
+    "insurance_coverage_gap": (insurance_coverage_gap_run, InsuranceCoverageGapInput),
 }
 
 
