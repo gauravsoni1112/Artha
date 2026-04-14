@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import uuid
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.schemas.db_models import Holding
 from libs.schemas.money import format_inr
+from libs.telemetry.tracing import start_span
 from services.agent.tools.base import ToolResult
+
+log = structlog.get_logger(__name__)
 
 
 async def run(
@@ -25,52 +29,57 @@ async def run(
     owner_id: str,
 ) -> ToolResult:
     """Compute total net worth: sum of all holding current values, grouped by asset class."""
-    owner_uuid = uuid.UUID(owner_id)
+    log.info("tool.net_worth.start", owner_id=owner_id)
 
-    stmt = (
-        select(
-            Holding.asset_class,
-            func.sum(Holding.current_value_paise).label("total_paise"),
-            func.count(Holding.id).label("count"),
-        )
-        .where(
-            Holding.owner_id == owner_uuid,
-            Holding.current_value_paise.isnot(None),
-        )
-        .group_by(Holding.asset_class)
-    )
+    with start_span("tool.net_worth", {"owner_id": owner_id}):
+        owner_uuid = uuid.UUID(owner_id)
 
-    rows = (await session.execute(stmt)).all()
-
-    asset_breakdown = []
-    total_assets = 0
-
-    for asset_class, total_paise, count in rows:
-        total_paise = total_paise or 0
-        total_assets += total_paise
-        asset_breakdown.append(
-            {
-                "asset_class": asset_class,
-                "current_value_paise": total_paise,
-                "current_value_inr": format_inr(total_paise),
-                "holding_count": count,
-            }
+        stmt = (
+            select(
+                Holding.asset_class,
+                func.sum(Holding.current_value_paise).label("total_paise"),
+                func.count(Holding.id).label("count"),
+            )
+            .where(
+                Holding.owner_id == owner_uuid,
+                Holding.current_value_paise.isnot(None),
+            )
+            .group_by(Holding.asset_class)
         )
 
-    # Sort descending by value
-    asset_breakdown.sort(key=lambda x: -x["current_value_paise"])
+        rows = (await session.execute(stmt)).all()
 
-    warnings = []
-    if not asset_breakdown:
-        warnings.append("No holdings found. Ingest a CAS statement or add holdings manually.")
+        asset_breakdown = []
+        total_assets = 0
 
-    return ToolResult(
-        tool_name="net_worth",
-        query_params={"owner_id": owner_id},
-        data={
-            "total_net_worth_paise": total_assets,
-            "total_net_worth_inr": format_inr(total_assets),
-            "asset_breakdown": asset_breakdown,
-        },
-        warnings=warnings,
-    )
+        for asset_class, total_paise, count in rows:
+            total_paise = total_paise or 0
+            total_assets += total_paise
+            asset_breakdown.append(
+                {
+                    "asset_class": asset_class,
+                    "current_value_paise": total_paise,
+                    "current_value_inr": format_inr(total_paise),
+                    "holding_count": count,
+                }
+            )
+
+        # Sort descending by value
+        asset_breakdown.sort(key=lambda x: -x["current_value_paise"])
+
+        warnings = []
+        if not asset_breakdown:
+            warnings.append("No holdings found. Ingest a CAS statement or add holdings manually.")
+
+        log.info("tool.net_worth.complete", owner_id=owner_id, total_net_worth_paise=total_assets)
+
+        return ToolResult(
+            tool_name="net_worth",
+            query_params={"owner_id": owner_id},
+            data={
+                "total_net_worth_paise": total_assets,
+                "total_net_worth_inr": format_inr(total_assets),
+                "asset_breakdown": asset_breakdown,
+            },
+            warnings=warnings,
+        )

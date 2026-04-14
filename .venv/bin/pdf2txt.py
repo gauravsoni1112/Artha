@@ -1,4 +1,4 @@
-#!/Users/soni/Documents/workspace/Artha/.venv/bin/python
+#!/Users/soni/Documents/workspace/Artha/.venv/bin/python3.12
 """A command line tool for extracting text and images from PDF and
 output it to plain text, html, xml or tags.
 """

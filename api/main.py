@@ -9,7 +9,10 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from api.rate_limit import limiter
 from api.routers.agent import router as agent_router
 from api.routers.ingestion import ingestion_runs_router, router as ingestion_router
 from libs.telemetry.logging import configure_logging
@@ -44,6 +47,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# ── Rate limiting ────────────────────────────────────────────────────
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.include_router(ingestion_router)
 app.include_router(ingestion_runs_router)

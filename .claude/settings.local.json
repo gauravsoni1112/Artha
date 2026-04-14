@@ -17,7 +17,16 @@
       "Bash(.venv/bin/python -c \"import camelot; print\\('camelot ok'\\)\")",
       "Bash(.venv/bin/python -c \"import pdfplumber; print\\('pdfplumber ok'\\)\")",
       "Bash(.venv/bin/python:*)",
-      "Bash(./.venv/bin/pytest tests/unit/ -v --tb=short)"
+      "Bash(./.venv/bin/pytest tests/unit/ -v --tb=short)",
+      "Bash(docker compose:*)",
+      "Bash(curl -s http://localhost:8000/docs)",
+      "Bash(curl:*)",
+      "Bash(pkill -f \"uvicorn api.main:app\")",
+      "Bash(.venv/bin/pytest tests/unit/agent/ -v --tb=short)",
+      "Bash(ls -1 tests/unit/agent/*.py)",
+      "Bash(cat tests/unit/agent/*.py)",
+      "Bash(pip show:*)",
+      "Bash(/Users/soni/Documents/workspace/Artha/.venv/bin/python:*)"
     ]
   }
 }

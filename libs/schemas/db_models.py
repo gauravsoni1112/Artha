@@ -55,6 +55,7 @@ class Owner(Base):
     holdings: Mapped[list["Holding"]] = relationship("Holding", back_populates="owner")
     goals: Mapped[list["FinancialGoal"]] = relationship("FinancialGoal", back_populates="owner")
     tax_records: Mapped[list["TaxData"]] = relationship("TaxData", back_populates="owner")
+    chat_sessions: Mapped[list["ChatSession"]] = relationship("ChatSession", back_populates="owner")
 
 
 class Account(Base):
@@ -293,4 +294,60 @@ class TransactionQuarantine(Base):
     __table_args__ = (
         Index("idx_quarantine_status", "quarantine_status"),
         Index("idx_quarantine_run", "ingestion_run_id"),
+    )
+
+
+class ChatSession(Base):
+    """Persisted conversation session for multi-turn agent interactions."""
+
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False
+    )
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)  # first 80 chars of first message
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")  # ACTIVE | CLOSED
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    owner: Mapped["Owner"] = relationship("Owner", back_populates="chat_sessions")
+    turns: Mapped[list["AgentRun"]] = relationship("AgentRun", back_populates="session")
+
+    __table_args__ = (Index("idx_chat_sessions_owner", "owner_id"),)
+
+
+class AgentRun(Base):
+    """One turn/request in a chat session — the agent's reasoning and response."""
+
+    __tablename__ = "agent_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False
+    )
+    user_message: Mapped[str] = mapped_column(Text, nullable=False)
+    assistant_response: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_calls: Mapped[list] = mapped_column(JSONB, nullable=False)  # list of tool names invoked
+    messages_trace: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # full LangGraph trace
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="OK")  # OK | ERROR
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    session: Mapped["ChatSession"] = relationship("ChatSession", back_populates="turns")
+
+    __table_args__ = (
+        Index("idx_agent_runs_session", "session_id"),
+        Index("idx_agent_runs_owner", "owner_id"),
     )

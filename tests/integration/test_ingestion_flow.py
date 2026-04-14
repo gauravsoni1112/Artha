@@ -18,7 +18,7 @@ from datetime import date
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from libs.schemas.db_models import (
@@ -48,13 +48,33 @@ def event_loop_policy():
 
 @pytest_asyncio.fixture(scope="function")
 async def db_session():
-    """Provide a test DB session that rolls back after each test."""
+    """Provide a test DB session that rolls back after each test.
+
+    Uses a nested transaction (savepoint) so that commits inside the
+    service code commit to the savepoint rather than the real DB.
+    The outer transaction is rolled back after the test, leaving the
+    database unchanged.
+    """
     engine = create_async_engine(TEST_DB_URL, echo=False)
     SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with SessionLocal() as session:
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+
+        # Redirect session.commit() to a nested savepoint so the
+        # outer transaction can still be rolled back.
+        @event.listens_for(session.sync_session, "after_transaction_end")
+        def restart_savepoint(db_session, transaction):
+            if transaction.nested and not transaction._parent.nested:
+                session.sync_session.begin_nested()
+
+        await conn.begin_nested()
+
         yield session
-        await session.rollback()
+
+        await session.close()
+        await trans.rollback()
 
     await engine.dispose()
 

@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "artha"
@@ -11,10 +11,12 @@ dependencies = [
     # Web framework
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",
+    "slowapi>=0.1.9",
 
     # Database
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
+    "psycopg[binary]>=3.1.0",
     "alembic>=1.13.1",
 
     # Validation
