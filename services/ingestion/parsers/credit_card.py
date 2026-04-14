@@ -112,9 +112,10 @@ class CreditCardParser(BaseParser):
         raw_bytes: bytes,
         owner_id: uuid.UUID,
         account_id: uuid.UUID,
+        password: str | None = None,
     ) -> list[RawTransaction]:
         try:
-            pdf = pdfplumber.open(io.BytesIO(raw_bytes))
+            pdf = pdfplumber.open(io.BytesIO(raw_bytes), password=password)
         except Exception as exc:
             raise ParseError(f"Cannot open PDF: {exc}") from exc
 

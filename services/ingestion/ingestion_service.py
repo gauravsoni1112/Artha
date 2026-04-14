@@ -42,6 +42,7 @@ from libs.tax_rules.fiscal_year import get_fiscal_year
 from libs.telemetry.tracing import start_span
 from services.ingestion.connectors.base import FetchedDocument
 from services.ingestion.dedup import compute_source_hash
+from services.ingestion.parsers.base import ParseError
 from services.ingestion.parsers.factory import for_type as parser_for_type
 from services.storage.file_store import FileStore
 from services.storage.notification import NotificationClient
@@ -172,10 +173,29 @@ class IngestionService:
 
         # ── Step 3: Parse ─────────────────────────────────────────
         parser = parser_for_type(fetched_doc.doc_type)
+        candidate_passwords: list[str | None] = list(fetched_doc.pdf_passwords) or [None]
+        raw_transactions: list[RawTransaction] | None = None
+        last_parse_error: Exception | None = None
         with start_span("parse_document", {"parser": parser.source_name}):
-            raw_transactions: list[RawTransaction] = parser.parse(
-                raw_bytes, owner_id, fetched_doc.account_id
-            )
+            for pw in candidate_passwords:
+                try:
+                    raw_transactions = parser.parse(
+                        raw_bytes,
+                        owner_id,
+                        fetched_doc.account_id,
+                        password=pw,
+                    )
+                    break
+                except ParseError as exc:
+                    last_parse_error = exc
+                    log.warning(
+                        "ingestion.parse_attempt_failed",
+                        parser=parser.source_name,
+                        had_password=pw is not None,
+                        error=str(exc),
+                    )
+        if raw_transactions is None:
+            raise last_parse_error or ParseError("Parser returned no result")
         log.info("ingestion.parsed", count=len(raw_transactions), parser=parser.source_name)
         await self._update_run(run_id, records_fetched=len(raw_transactions))
 

@@ -53,6 +53,7 @@ class ManualParser(BaseParser):
         raw_bytes: bytes,
         owner_id: uuid.UUID,
         account_id: uuid.UUID,
+        password: str | None = None,
     ) -> list[RawTransaction]:
         try:
             payload = json.loads(raw_bytes)

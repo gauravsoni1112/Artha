@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from libs.schemas.enums import DocumentType, IngestionSource
 
@@ -24,6 +24,7 @@ class FetchedDocument:
     account_id: uuid.UUID
     suggested_filename: str = ""    # used for file_store naming / logging
     metadata: dict | None = None    # source-specific metadata (Gmail message ID, etc.)
+    pdf_passwords: list[str] = field(default_factory=list)  # tried in order; empty = no password
 
 
 class ConnectorABC(ABC):

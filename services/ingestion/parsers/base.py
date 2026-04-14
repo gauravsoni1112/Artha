@@ -24,6 +24,7 @@ class BaseParser(ABC):
         raw_bytes: bytes,
         owner_id: uuid.UUID,
         account_id: uuid.UUID,
+        password: str | None = None,
     ) -> list[RawTransaction]:
         """
         Parse raw document bytes into a list of RawTransaction objects.
@@ -32,6 +33,7 @@ class BaseParser(ABC):
             raw_bytes: raw PDF bytes (or JSON/YAML bytes for manual parsers)
             owner_id: UUID of the owning family member
             account_id: UUID of the source account
+            password: optional PDF password (ignored by non-PDF parsers)
 
         Returns:
             List of RawTransaction instances (may be empty if no transactions found).

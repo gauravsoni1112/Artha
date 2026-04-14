@@ -21,6 +21,7 @@ import base64
 import hashlib
 import os
 import uuid
+from email.utils import parseaddr
 from pathlib import Path
 
 import structlog
@@ -48,12 +49,38 @@ _DEFAULT_QUERIES: list[tuple[str, DocumentType]] = [
     # Credit card statements
     ("from:credit_card@hdfcbank.net has:attachment filename:pdf", DocumentType.CC_STATEMENT),
     ("from:creditcard@axisbank.com has:attachment filename:pdf", DocumentType.CC_STATEMENT),
+    ("from:cbssbi.cas@alerts.sbi.co.in has:attachment filename:pdf", DocumentType.BANK_STATEMENT),
+    ("from:bankstatements@kotak.bank.in has:attachment filename:pdf", DocumentType.BANK_STATEMENT),
+    ("from:estatement@icici.bank.in has:attachment filename:pdf", DocumentType.BANK_STATEMENT),
     # Mutual fund CAS
     ("from:noreply@camsonline.com has:attachment filename:pdf", DocumentType.MF_CAS),
+    ("from:donotreply@camsonline.com has:attachment filename:pdf", DocumentType.MF_CAS),
     ("from:mfcas@kfintech.com has:attachment filename:pdf", DocumentType.MF_CAS),
     # Subject-based fallback for CAS
     ('subject:"Consolidated Account Statement" has:attachment filename:pdf', DocumentType.MF_CAS),
 ]
+
+
+def _passwords_for_sender(sender_email: str) -> list[str]:
+    """
+    Look up PDF_PASSWORD_<sender_email> in environment.
+    Returns a list of candidate passwords (comma-separated in the env value),
+    or [] if nothing is configured. Candidates are tried in order.
+    """
+    if not sender_email:
+        return []
+    raw = os.getenv(f"PDF_PASSWORD_{sender_email}", "")
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _extract_sender(message: dict) -> str:
+    """Pull the From header off a Gmail message and return just the email address."""
+    headers = message.get("payload", {}).get("headers", []) or []
+    for h in headers:
+        if h.get("name", "").lower() == "from":
+            _, addr = parseaddr(h.get("value", ""))
+            return addr.lower()
+    return ""
 
 
 class GmailConnector(ConnectorABC):
@@ -143,6 +170,8 @@ class GmailConnector(ConnectorABC):
                     message = (
                         service.users().messages().get(userId="me", id=msg_id).execute()
                     )
+                    sender_email = _extract_sender(message)
+                    pdf_passwords = _passwords_for_sender(sender_email)
                     attachments = self._extract_pdf_attachments(service, msg_id, message)
                     for pdf_bytes, filename in attachments:
                         account_id = self._account_id_map.get(
@@ -155,7 +184,11 @@ class GmailConnector(ConnectorABC):
                                 source=IngestionSource.GMAIL,
                                 account_id=account_id,
                                 suggested_filename=filename,
-                                metadata={"gmail_message_id": msg_id},
+                                metadata={
+                                    "gmail_message_id": msg_id,
+                                    "sender": sender_email,
+                                },
+                                pdf_passwords=pdf_passwords,
                             )
                         )
                 except Exception as exc:
