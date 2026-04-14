@@ -359,3 +359,42 @@ class AgentRun(Base):
         Index("idx_agent_runs_session", "session_id"),
         Index("idx_agent_runs_owner", "owner_id"),
     )
+
+
+class AgentRegistryEntry(Base):
+    """
+    Phase 4 — Domain agent registry.
+
+    Agents self-register on startup by POSTing to the registry service.
+    The router resolves capability → endpoint at dispatch time.
+
+    INVARIANT: Only the registry service writes to this table.
+    All other services treat it as read-only.
+    """
+
+    __tablename__ = "agent_registry"
+
+    agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    capabilities: Mapped[list] = mapped_column(JSONB, nullable=False)  # list[str] e.g. ["cashflow","spending"]
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)          # e.g. http://cashflow_agent:8001
+    health_endpoint: Mapped[str] = mapped_column(Text, nullable=False)   # e.g. http://cashflow_agent:8001/health
+    timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=10000)
+    fallback_strategy: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="cached_response"
+    )  # cached_response | skip | error
+    cache_ttl_hours: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=1.0)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="individual")  # individual | family
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="HEALTHY")    # HEALTHY | DEGRADED | DOWN
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_agent_registry_status", "status"),
+        Index("idx_agent_registry_scope", "scope"),
+    )
