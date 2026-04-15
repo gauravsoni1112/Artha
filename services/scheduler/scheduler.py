@@ -30,14 +30,14 @@ def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        # Parse host/port from URL for APScheduler RedisJobStore
-        # redis://localhost:6379/0 → host=localhost, port=6379, db=0
+        # Parse host/port/db from URL for APScheduler RedisJobStore.
+        # Handles both redis://host:port/db and redis://host:port (db defaults to 0).
         import re
-        m = re.match(r"redis://([^:]+):(\d+)/(\d+)", redis_url)
+        m = re.match(r"redis://([^:]+):(\d+)(?:/(\d+))?", redis_url)
         if m:
-            host, port, db = m.group(1), int(m.group(2)), int(m.group(3))
+            host, port, db = m.group(1), int(m.group(2)), int(m.group(3) or 0)
         else:
-            host, port, db = "localhost", 6379, 1
+            host, port, db = "localhost", 6379, 0
 
         jobstores = {
             "default": RedisJobStore(host=host, port=port, db=db),

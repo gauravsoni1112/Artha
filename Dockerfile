@@ -10,6 +10,7 @@ FROM python:3.12-slim
 
 # System deps for PDF parsing (camelot → ghostscript, pdfplumber → poppler)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
         ghostscript \
         libgl1 \
         poppler-utils \

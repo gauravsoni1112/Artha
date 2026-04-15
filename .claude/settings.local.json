@@ -32,7 +32,12 @@
       "Bash(alembic current:*)",
       "Bash(grep:*)",
       "Bash(git check-ignore:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls .env*)",
+      "Bash(ls Dockerfile*)",
+      "Bash(ls infra/Dockerfile*)"
     ]
   }
 }
