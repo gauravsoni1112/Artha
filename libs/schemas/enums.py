@@ -95,3 +95,24 @@ class ValidationStage(StrEnum):
     RANGE = "RANGE"
     ANOMALY = "ANOMALY"
     LOCALE = "LOCALE"
+
+
+class AccessScope(StrEnum):
+    """Who owns the data being accessed — enforced by Planner before dispatch."""
+    PRIMARY = "PRIMARY"
+    SPOUSE = "SPOUSE"
+    DEPENDENT = "DEPENDENT"
+
+
+class RecommendationState(StrEnum):
+    """
+    Lifecycle states for a recommendation.
+    Transitions are append-only events; see libs/schemas/recommendation.py::VALID_TRANSITIONS.
+    """
+    GENERATED = "GENERATED"
+    SURFACED = "SURFACED"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    MODIFIED = "MODIFIED"
+    OUTCOME_PENDING = "OUTCOME_PENDING"
+    OUTCOME_CONFIRMED = "OUTCOME_CONFIRMED"

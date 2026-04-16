@@ -44,6 +44,8 @@ class Owner(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     pan_hash: Mapped[str | None] = mapped_column(Text, nullable=True)  # SHA-256(PAN)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pin_hash: Mapped[str | None] = mapped_column(Text, nullable=True)  # scrypt(PIN)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -397,4 +399,221 @@ class AgentRegistryEntry(Base):
     __table_args__ = (
         Index("idx_agent_registry_status", "status"),
         Index("idx_agent_registry_scope", "scope"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Planner + Critic
+# ---------------------------------------------------------------------------
+
+
+class UserProfile(Base):
+    """
+    Persistent user profile — source of truth for Planner access scoping.
+
+    Agents NEVER read this table directly; the orchestrator builds a
+    UserProfileSnapshot and injects it into every AgentRequest.
+    """
+
+    __tablename__ = "user_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False, unique=True
+    )
+    risk_appetite: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="moderate"
+    )  # conservative | moderate | aggressive
+    age: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_family_scope: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    preferences: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # UI prefs
+    # Denormalised totals — kept in sync by the orchestrator, not by agents.
+    total_monthly_income_paise: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    income_sources_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    emis_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    scopes: Mapped[list["UserProfileScope"]] = relationship(
+        "UserProfileScope", back_populates="profile"
+    )
+    snapshots: Mapped[list["UserProfileSnapshot"]] = relationship(
+        "UserProfileSnapshot", back_populates="profile"
+    )
+
+    __table_args__ = (Index("idx_user_profiles_owner", "owner_id"),)
+
+
+class UserProfileScope(Base):
+    """
+    Maps a UserProfile to the owner_ids it may access, with their scope role.
+    Created by the orchestrator; never written by agents.
+
+    Example: profile for owner A grants PRIMARY access to A,
+             SPOUSE access to owner B, DEPENDENT to C.
+    """
+
+    __tablename__ = "user_profile_scopes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_profiles.id"), nullable=False
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)  # AccessScope enum
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    profile: Mapped["UserProfile"] = relationship("UserProfile", back_populates="scopes")
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", "owner_id", name="uq_profile_scope_owner"),
+        Index("idx_profile_scopes_profile", "profile_id"),
+    )
+
+
+class UserProfileSnapshot(Base):
+    """
+    Immutable point-in-time copy of a UserProfile.
+    Every Recommendation stores a snapshot_id so audit log is reproducible
+    even after the live profile changes.
+
+    INVARIANT: never update or delete rows in this table.
+    """
+
+    __tablename__ = "user_profile_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_profiles.id"), nullable=False
+    )
+    snapshot_json: Mapped[dict] = mapped_column(JSONB, nullable=False)  # serialised UserProfile
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    profile: Mapped["UserProfile"] = relationship("UserProfile", back_populates="snapshots")
+    recommendations: Mapped[list["Recommendation"]] = relationship(
+        "Recommendation", back_populates="snapshot"
+    )
+
+    __table_args__ = (Index("idx_snapshots_profile", "profile_id"),)
+
+
+class Recommendation(Base):
+    """
+    Immutable recommendation header — written once at plan completion.
+
+    current_state is a denormalized cache of the latest event_type for
+    efficient queries.  The recommendation_events table is authoritative.
+
+    INVARIANT: append-only. Never UPDATE this row after insert.
+    """
+
+    __tablename__ = "recommendations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False
+    )
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_profile_snapshots.id"), nullable=False
+    )
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_json: Mapped[dict] = mapped_column(JSONB, nullable=False)          # serialised Plan DAG
+    agent_outputs_json: Mapped[list] = mapped_column(JSONB, nullable=False) # full agent I/O for replay
+    final_output_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    composite_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    current_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="GENERATED"
+    )  # RecommendationState — denormalized
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    snapshot: Mapped["UserProfileSnapshot"] = relationship(
+        "UserProfileSnapshot", back_populates="recommendations"
+    )
+    events: Mapped[list["RecommendationEvent"]] = relationship(
+        "RecommendationEvent", back_populates="recommendation", order_by="RecommendationEvent.created_at"
+    )
+
+    __table_args__ = (
+        Index("idx_recommendations_owner", "owner_id"),
+        Index("idx_recommendations_state", "current_state"),
+        Index("idx_recommendations_snapshot", "snapshot_id"),
+    )
+
+
+class RecommendationEvent(Base):
+    """
+    Append-only audit log for recommendation state transitions.
+
+    Every state change (surfaced, accepted, rejected, …) is a new row.
+    Rows are never updated or deleted.
+    actor_user_id is NULL only for the initial GENERATED event.
+    """
+
+    __tablename__ = "recommendation_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    recommendation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("recommendations.id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)  # RecommendationState
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    recommendation: Mapped["Recommendation"] = relationship(
+        "Recommendation", back_populates="events"
+    )
+
+    __table_args__ = (
+        Index("idx_rec_events_recommendation", "recommendation_id"),
+        Index("idx_rec_events_type", "event_type"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 (frontend enablement) — family memberships + auth columns
+# ---------------------------------------------------------------------------
+
+
+class FamilyMembership(Base):
+    """
+    Lightweight family grouping.  The primary owner's id doubles as family_id.
+    Any family member with is_admin=True can manage static data for all members
+    in the same family.
+
+    role: PRIMARY | SPOUSE | DEPENDENT
+    """
+
+    __tablename__ = "family_memberships"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    family_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False
+    )  # primary owner's id acts as family group key
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("owners.id"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # PRIMARY | SPOUSE | DEPENDENT
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("family_id", "owner_id", name="uq_family_member"),
+        Index("idx_family_memberships_family", "family_id"),
+        Index("idx_family_memberships_owner", "owner_id"),
     )

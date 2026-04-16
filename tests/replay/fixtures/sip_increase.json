@@ -1,0 +1,66 @@
+{
+  "scenario_id": "sip_increase_10k",
+  "query": "Should I increase SIP by \u20b910k?",
+  "description": "Canonical Phase 5 exit criterion. Three agents weigh in on a SIP increase decision.",
+  "agent_responses": [
+    {
+      "agent_id": "cashflow_agent",
+      "schema_version": "1.0",
+      "trace_id": "00000000-0000-0000-0000-000000000001",
+      "data_tier": "REALTIME",
+      "data_freshness_hours": 0.05,
+      "result": {
+        "surplus_paise": 1800000,
+        "avg_monthly_spend_paise": 3500000,
+        "sip_current_paise": 1000000,
+        "note": "Monthly surplus \u20b918,000 after all fixed and variable expenses."
+      },
+      "confidence": 0.88,
+      "risk_level": "LOW",
+      "reasoning": "Last 3-month average surplus is \u20b918,000. A \u20b910,000 SIP increase would consume 56% of the surplus, leaving \u20b98,000 buffer.",
+      "warnings": [],
+      "fallback_used": false,
+      "fallback_reason": null
+    },
+    {
+      "agent_id": "investment_agent",
+      "schema_version": "1.0",
+      "trace_id": "00000000-0000-0000-0000-000000000002",
+      "data_tier": "REALTIME",
+      "data_freshness_hours": 0.1,
+      "result": {
+        "portfolio_value_paise": 5000000000,
+        "sip_current_paise": 1000000,
+        "xirr_pct": 13.4,
+        "suggested_sip_increase_paise": 1000000,
+        "note": "Current SIP \u20b910,000/mo. Suggested increase to \u20b920,000/mo."
+      },
+      "confidence": 0.82,
+      "risk_level": "LOW",
+      "reasoning": "Portfolio XIRR 13.4% over 3 years. Increasing SIP by \u20b910k would add ~\u20b920L to corpus over 10 years at same XIRR.",
+      "warnings": [],
+      "fallback_used": false,
+      "fallback_reason": null
+    },
+    {
+      "agent_id": "goal_agent",
+      "schema_version": "1.0",
+      "trace_id": "00000000-0000-0000-0000-000000000003",
+      "data_tier": "REALTIME",
+      "data_freshness_hours": 0.08,
+      "result": {
+        "primary_goal": "Retirement",
+        "target_years": 25,
+        "current_progress_pct": 15.3,
+        "sip_increase_impact_years": -1.2,
+        "note": "A \u20b910k SIP increase accelerates retirement goal by ~1.2 years."
+      },
+      "confidence": 0.79,
+      "risk_level": "LOW",
+      "reasoning": "Retirement corpus target is \u20b95 Cr. At current SIP, goal is achievable in 26.2 years. With +\u20b910k SIP, in 25 years.",
+      "warnings": [],
+      "fallback_used": false,
+      "fallback_reason": null
+    }
+  ]
+}

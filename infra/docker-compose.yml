@@ -41,6 +41,7 @@ x-agent-tune-env: &agent-tune-env
   CONTEXT_WINDOW_THRESHOLD: ${CONTEXT_WINDOW_THRESHOLD:-20}
   CONTEXT_WINDOW_KEEP: ${CONTEXT_WINDOW_KEEP:-6}
   AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-10}
+  AGENT_TIMEOUT_MS: ${AGENT_TIMEOUT_MS:-120000}
 
 
 services:
@@ -107,7 +108,7 @@ services:
   grafana:
     image: grafana/grafana:10.4.3
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: artha_grafana
     volumes:
@@ -312,6 +313,24 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # ── Frontend ──────────────────────────────────────────────────────────────────
+  # NEXT_PUBLIC_API_URL is a browser-facing URL — must use the host-mapped port
+  # (localhost:8000), not the Docker-internal hostname (api:8000).
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    image: artha-frontend:latest
+    ports:
+      - "3000:3000"
+    networks:
+      - artha_registry_net
+    depends_on:
+      api:
+        condition: service_healthy
 
 
 volumes:

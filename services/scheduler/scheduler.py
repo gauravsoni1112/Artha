@@ -2,7 +2,12 @@
 APScheduler setup for Artha.
 
 Uses AsyncIOScheduler (in-process, no extra worker processes).
-Redis is used as the job store so jobs survive restarts.
+Jobs are stored in-memory; they are re-registered at every startup
+(replace_existing=True), so persistence across restarts is not needed.
+
+Note: RedisJobStore was removed because it pickle-serialises bound methods,
+which fails when those methods capture a SQLAlchemy engine (the engine
+contains unpicklable closures from create_async_engine).
 
 Usage:
     from services.scheduler.scheduler import get_scheduler
@@ -12,10 +17,8 @@ Usage:
     scheduler.add_job(my_job, "cron", hour=6, minute=0, id="gmail_ingest")
 """
 
-import os
-
 from apscheduler.executors.asyncio import AsyncIOExecutor
-from apscheduler.jobstores.redis import RedisJobStore
+from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import structlog
@@ -29,25 +32,15 @@ def get_scheduler() -> AsyncIOScheduler:
     """Return the singleton AsyncIOScheduler instance."""
     global _scheduler
     if _scheduler is None:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        # Parse host/port/db from URL for APScheduler RedisJobStore.
-        # Handles both redis://host:port/db and redis://host:port (db defaults to 0).
-        import re
-        m = re.match(r"redis://([^:]+):(\d+)(?:/(\d+))?", redis_url)
-        if m:
-            host, port, db = m.group(1), int(m.group(2)), int(m.group(3) or 0)
-        else:
-            host, port, db = "localhost", 6379, 0
-
         jobstores = {
-            "default": RedisJobStore(host=host, port=port, db=db),
+            "default": MemoryJobStore(),
         }
         executors = {
             "default": AsyncIOExecutor(),
         }
         job_defaults = {
-            "coalesce": True,       # run only once if missed multiple times
-            "max_instances": 1,     # never run the same job concurrently
+            "coalesce": True,            # run only once if missed multiple times
+            "max_instances": 1,          # never run the same job concurrently
             "misfire_grace_time": 3600,  # tolerate up to 1hr of missed time
         }
         _scheduler = AsyncIOScheduler(
@@ -55,6 +48,6 @@ def get_scheduler() -> AsyncIOScheduler:
             executors=executors,
             job_defaults=job_defaults,
         )
-        log.info("scheduler.initialised", redis_host=host, redis_port=port)
+        log.info("scheduler.initialised")
 
     return _scheduler

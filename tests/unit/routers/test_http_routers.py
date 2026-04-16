@@ -379,3 +379,265 @@ def test_chat_phase4_success():
     assert data["response"] == "You spent ₹12,400."
     assert data["confidence"] == pytest.approx(0.92)
     assert len(data["reasoning_steps"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# /orchestrator/recommendation  (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+from api.routers.orchestrator import (
+    get_registry,
+    get_breaker,
+    get_response_cache,
+    router as orchestrator_router,
+)
+from libs.schemas.db_models import UserProfile as UserProfileORM, UserProfileScope
+from libs.schemas.enums import RecommendationState
+from services.orchestrator.breaker import InMemoryBreakerStore, BreakerConfig
+from services.orchestrator.critic import CriticResult
+from services.orchestrator.dispatch import DispatchedResult
+from libs.confidence.tier import FallbackTier
+
+
+def _orchestrator_client(mock_session, mock_registry=None, mock_breaker=None, mock_cache=None) -> TestClient:
+    app = FastAPI()
+    app.include_router(orchestrator_router)
+
+    async def override_session():
+        yield mock_session
+
+    app.dependency_overrides[get_session] = override_session
+
+    if mock_registry is not None:
+        app.dependency_overrides[get_registry] = lambda: mock_registry
+    if mock_breaker is not None:
+        app.dependency_overrides[get_breaker] = lambda: mock_breaker
+    if mock_cache is not None:
+        app.dependency_overrides[get_response_cache] = lambda: mock_cache
+
+    return TestClient(app)
+
+
+def _mock_profile_orm(owner_id: uuid.UUID) -> UserProfileORM:
+    p = UserProfileORM()
+    p.id = uuid.uuid4()
+    p.owner_id = owner_id
+    p.risk_appetite = "moderate"
+    p.age = 35
+    p.is_family_scope = False
+    p.total_monthly_income_paise = 500_000_00
+    p.income_sources_json = []
+    p.emis_json = []
+    return p
+
+
+def _mock_critic_result(score: float = 72.5) -> CriticResult:
+    return CriticResult(
+        final_confidence=score,
+        baseline_confidence=score + 5.0,
+        total_penalty=5.0,
+        consistency_flags=[],
+        schema_warnings=[],
+        gaps=[],
+        warnings=[],
+    )
+
+
+def _mock_dispatched_primary(agent_id: str = "cashflow_agent") -> DispatchedResult:
+    from libs.schemas.agent_envelope import AgentResponse, DataTier, RiskLevel
+    return DispatchedResult(
+        agent_id=agent_id,
+        response=AgentResponse(
+            agent_id=agent_id,
+            trace_id=uuid.uuid4(),
+            data_tier=DataTier.REALTIME,
+            data_freshness_hours=0.0,
+            result={"surplus_paise": 1_800_000},
+            confidence=0.85,
+            risk_level=RiskLevel.LOW,
+            reasoning="ok",
+        ),
+        fallback_tier=FallbackTier.PRIMARY,
+    )
+
+
+def test_create_recommendation_profile_not_found_404():
+    mock_session = AsyncMock()
+    mock_session.scalar = AsyncMock(return_value=None)  # no profile
+
+    mock_registry = MagicMock()
+    mock_registry.list_available.return_value = []
+    mock_breaker = InMemoryBreakerStore(BreakerConfig())
+    mock_cache = AsyncMock()
+
+    client = _orchestrator_client(mock_session, mock_registry, mock_breaker, mock_cache)
+    resp = client.post(
+        "/orchestrator/recommendation",
+        json={"owner_id": str(uuid.uuid4()), "query": "Should I increase SIP?"},
+    )
+    assert resp.status_code == 404
+    assert "profile" in resp.json()["detail"].lower()
+
+
+def test_create_recommendation_success_201():
+    owner_id = uuid.uuid4()
+    profile_orm = _mock_profile_orm(owner_id)
+
+    # Fake Owner
+    from libs.schemas.db_models import Owner
+    owner = Owner()
+    owner.id = owner_id
+    owner.name = "Rahul"
+
+    # Fake snapshot with id
+    from libs.schemas.db_models import UserProfileSnapshot, Recommendation, RecommendationEvent
+    snapshot = UserProfileSnapshot()
+    snapshot.id = uuid.uuid4()
+    snapshot.profile_id = profile_orm.id
+    snapshot.snapshot_json = {}
+
+    # Fake recommendation with id
+    rec = Recommendation()
+    rec.id = uuid.uuid4()
+    rec.current_state = RecommendationState.GENERATED.value
+    rec.composite_confidence = 72.5
+    rec.final_output_json = {"final_confidence": 72.5}
+
+    added_objects = []
+    flush_call_count = [0]
+
+    async def fake_flush():
+        flush_call_count[0] += 1
+        # Assign IDs on first two flushes (snapshot, then rec)
+        for obj in added_objects:
+            if not hasattr(obj, "id") or obj.id is None:
+                obj.id = uuid.uuid4()
+
+    mock_session = AsyncMock()
+    mock_session.scalar = AsyncMock(return_value=profile_orm)
+    mock_session.get = AsyncMock(side_effect=lambda model, pk: owner if model is Owner else rec)
+    mock_session.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))))
+    mock_session.add = MagicMock(side_effect=lambda obj: added_objects.append(obj))
+    mock_session.flush = fake_flush
+    mock_session.commit = AsyncMock()
+
+    mock_registry = MagicMock()
+    mock_registry.list_available.return_value = []
+
+    mock_breaker = InMemoryBreakerStore(BreakerConfig())
+    mock_cache = AsyncMock()
+
+    dispatched = [_mock_dispatched_primary()]
+    critic = _mock_critic_result()
+
+    client = _orchestrator_client(mock_session, mock_registry, mock_breaker, mock_cache)
+
+    with (
+        patch("api.routers.orchestrator.dispatch_plan", new=AsyncMock(return_value=dispatched)),
+        patch("api.routers.orchestrator.critic_evaluate", return_value=critic),
+        patch("api.routers.orchestrator.create_snapshot", new=AsyncMock(return_value=snapshot)),
+        patch("api.routers.orchestrator.create_recommendation", new=AsyncMock(return_value=rec)),
+    ):
+        resp = client.post(
+            "/orchestrator/recommendation",
+            json={"owner_id": str(owner_id), "query": "Should I increase SIP by ₹10k?"},
+        )
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "recommendation_id" in data
+    assert data["state"] == "GENERATED"
+    assert isinstance(data["final_confidence"], float)
+
+
+def test_add_event_invalid_transition_422():
+    """GENERATED → ACCEPTED is invalid → 422."""
+    from libs.schemas.db_models import Recommendation
+
+    rec = Recommendation()
+    rec.id = uuid.uuid4()
+    rec.current_state = RecommendationState.GENERATED.value
+
+    mock_session = AsyncMock()
+    mock_session.get = AsyncMock(return_value=rec)
+    mock_session.add = MagicMock()
+    mock_session.flush = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    client = _orchestrator_client(mock_session)
+    rec_id = uuid.uuid4()
+
+    resp = client.post(
+        f"/orchestrator/recommendation/{rec_id}/events",
+        json={
+            "event_type": "ACCEPTED",
+            "actor_user_id": str(uuid.uuid4()),
+            "payload": {},
+        },
+    )
+    assert resp.status_code == 422
+    assert "GENERATED" in resp.json()["detail"]
+
+
+def test_add_event_valid_transition_200():
+    """GENERATED → SURFACED is valid → 200."""
+    from libs.schemas.db_models import Recommendation, RecommendationEvent
+
+    rec = Recommendation()
+    rec.id = uuid.uuid4()
+    rec.current_state = RecommendationState.GENERATED.value
+
+    event = RecommendationEvent()
+    event.id = uuid.uuid4()
+    event.recommendation_id = rec.id
+    event.event_type = RecommendationState.SURFACED.value
+
+    mock_session = AsyncMock()
+    # First get → rec (for transition_state), second get → rec (for current_state)
+    mock_session.get = AsyncMock(return_value=rec)
+    mock_session.add = MagicMock()
+    mock_session.flush = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    client = _orchestrator_client(mock_session)
+
+    with patch(
+        "api.routers.orchestrator.transition_state",
+        new=AsyncMock(return_value=event),
+    ):
+        resp = client.post(
+            f"/orchestrator/recommendation/{rec.id}/events",
+            json={
+                "event_type": "SURFACED",
+                "actor_user_id": str(uuid.uuid4()),
+                "payload": {},
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["event_type"] == "SURFACED"
+
+
+def test_add_event_recommendation_not_found_404():
+    mock_session = AsyncMock()
+    mock_session.get = AsyncMock(return_value=None)
+    mock_session.flush = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    client = _orchestrator_client(mock_session)
+
+    with patch(
+        "api.routers.orchestrator.transition_state",
+        new=AsyncMock(side_effect=ValueError("Recommendation not found")),
+    ):
+        resp = client.post(
+            f"/orchestrator/recommendation/{uuid.uuid4()}/events",
+            json={
+                "event_type": "SURFACED",
+                "actor_user_id": str(uuid.uuid4()),
+            },
+        )
+
+    assert resp.status_code == 404

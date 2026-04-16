@@ -37,7 +37,7 @@ from libs.telemetry.tracing import start_span
 from services.agent.config import LLMConfig
 from services.agent.context import compact_messages
 from services.agent.planner import PlannerNode
-from services.agent.reflection import ReflectionNode, ReflectionResult
+from services.agent.reflection import ReflectionNode
 from services.agents._common.agent_config import agent_llm_config
 
 log = structlog.get_logger(__name__)
@@ -45,8 +45,6 @@ log = structlog.get_logger(__name__)
 # How many reflection iterations before we give up and return best effort
 _MAX_REFLECT = int(os.getenv("MAX_REFLECT_ITERATIONS", "2"))
 _REFLECT_THRESHOLD = float(os.getenv("REFLECTION_THRESHOLD", "0.7"))
-_CONTEXT_THRESHOLD = int(os.getenv("CONTEXT_WINDOW_THRESHOLD", "20"))
-_CONTEXT_KEEP = int(os.getenv("CONTEXT_WINDOW_KEEP", "6"))
 _RECURSION_LIMIT = int(os.getenv("AGENT_MAX_ITERATIONS", "10"))
 
 
@@ -95,7 +93,7 @@ class BaseAgent(ABC):
 
     async def run(self, request: AgentRequest) -> AgentResponse:
         """Execute the agent for *request* and return an envelope response."""
-        with start_span(f"{self.AGENT_ID}.run", trace_id=str(request.trace_id)):
+        with start_span(f"{self.AGENT_ID}.run", {"trace_id": str(request.trace_id)}):
             log.info(
                 "agent.run.start",
                 agent_id=self.AGENT_ID,
@@ -157,7 +155,7 @@ class BaseAgent(ABC):
         tool_freshness: list[datetime] = []
 
         for iteration in range(_MAX_REFLECT + 1):
-            messages = compact_messages(messages, _CONTEXT_THRESHOLD, _CONTEXT_KEEP)
+            messages, _ = await compact_messages(messages, self._llm)
 
             graph_state = await self._graph.ainvoke(
                 {"messages": messages},
@@ -173,19 +171,20 @@ class BaseAgent(ABC):
             # Collect tool freshness timestamps from ToolResults embedded in messages
             tool_freshness.extend(_extract_freshness(final_messages))
 
-            # Reflect
-            reflection: ReflectionResult = await self._reflector.reflect(
-                messages=final_messages,
-                answer=raw_answer,
-            )
-            all_warnings.extend(reflection.warnings)
+            # Reflect — acall takes a state dict, returns a state dict
+            reflection_state = await self._reflector.acall({
+                "messages": final_messages,
+                "reflect_count": iteration,
+            })
+            confidence = reflection_state["confidence_score"]
+            notes = reflection_state.get("reflection_notes", "")
 
-            if reflection.confidence >= best_confidence:
-                best_confidence = reflection.confidence
-                best_reasoning = reflection.reasoning
+            if confidence >= best_confidence:
+                best_confidence = confidence
+                best_reasoning = notes
                 best_result = {"answer": raw_answer}
 
-            if reflection.confidence >= _REFLECT_THRESHOLD:
+            if confidence >= _REFLECT_THRESHOLD:
                 break
 
             if iteration < _MAX_REFLECT:
@@ -193,13 +192,13 @@ class BaseAgent(ABC):
                     "agent.reflect.rerun",
                     agent_id=self.AGENT_ID,
                     iteration=iteration + 1,
-                    confidence=reflection.confidence,
+                    confidence=confidence,
                 )
                 messages = final_messages + [
                     HumanMessage(
                         content=(
-                            f"Your answer had confidence {reflection.confidence:.2f}. "
-                            f"Issues: {'; '.join(reflection.warnings or ['none'])}. "
+                            f"Your answer had confidence {confidence:.2f}. "
+                            f"Issues: {notes or 'none'}. "
                             "Please refine your analysis."
                         )
                     )

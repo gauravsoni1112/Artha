@@ -25,7 +25,7 @@ class IncomeSource(BaseModel):
 class EMI(BaseModel):
     label: str = Field(..., description="e.g. 'Home Loan - SBI'")
     monthly_paise: int = Field(..., ge=0)
-    remaining_months: int = Field(..., ge=0)
+    remaining_months: int = Field(0, ge=0)
 
 
 class FinancialGoal(BaseModel):
