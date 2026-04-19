@@ -93,6 +93,9 @@ def format_inr(paise: int) -> str:
     Returns:
         e.g. "₹1,00,000.50" or "-₹500.00"
     """
+    # asyncpg returns Decimal for aggregate (SUM) results on integer columns
+    if isinstance(paise, Decimal):
+        paise = int(paise)
     if not isinstance(paise, int):
         raise TypeError(f"paise must be int, got {type(paise).__name__}")
 

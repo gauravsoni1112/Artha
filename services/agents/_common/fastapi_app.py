@@ -83,17 +83,16 @@ def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
         if session_factory is None:
             raise HTTPException(status_code=503, detail="DB session not initialised")
 
-        async with session_factory() as session:
-            agent = agent_class(session=session)
-            try:
-                return await agent.run(request)
-            except Exception as exc:
-                log.error(
-                    "agent.run.error",
-                    agent_id=agent_class.AGENT_ID,
-                    trace_id=str(request.trace_id),
-                    error=str(exc),
-                )
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        agent = agent_class(session_factory=session_factory)
+        try:
+            return await agent.run(request)
+        except Exception as exc:
+            log.error(
+                "agent.run.error",
+                agent_id=agent_class.AGENT_ID,
+                trace_id=str(request.trace_id),
+                error=str(exc),
+            )
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return app

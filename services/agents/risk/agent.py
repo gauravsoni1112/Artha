@@ -46,21 +46,15 @@ class RiskAgent(BaseAgent):
     CAPABILITIES = ["risk", "insurance", "emergency_fund", "debt"]
 
     def _build_tools(self) -> list[StructuredTool]:
-        session = self._session
-        tools = []
-        for name, fn, schema in _RISK_TOOLS:
-            async def _bound(session=session, fn=fn, **kwargs):
-                return (await fn(session=session, **kwargs)).to_llm_str()
-
-            tools.append(
-                StructuredTool(
-                    name=name,
-                    description=fn.__doc__ or name,
-                    args_schema=schema,
-                    coroutine=_bound,
-                )
+        return [
+            StructuredTool(
+                name=name,
+                description=fn.__doc__ or name,
+                args_schema=schema,
+                coroutine=self._make_tool_bound(fn),
             )
-        return tools
+            for name, fn, schema in _RISK_TOOLS
+        ]
 
     def _system_prompt(self, user_profile: UserProfile) -> str:
         annual_income_paise = user_profile.total_monthly_income_paise * 12

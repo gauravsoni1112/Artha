@@ -67,13 +67,13 @@ async def run(
                 warnings=["No holdings found. Ingest a CAS statement to analyse concentration."],
             )
 
-        total_paise = sum(r.total_paise or 0 for r in rows)
+        total_paise = sum(int(r.total_paise or 0) for r in rows)
 
         breakdown = []
         concentrated: list[str] = []
 
         for row in sorted(rows, key=lambda r: -(r.total_paise or 0)):
-            value = row.total_paise or 0
+            value = int(row.total_paise or 0)
             pct = round(value / total_paise * 100, 2) if total_paise else 0.0
             entry = {
                 "asset_class": row.asset_class,

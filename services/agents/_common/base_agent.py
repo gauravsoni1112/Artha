@@ -29,10 +29,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import MessagesState
 from langgraph.prebuilt import ToolNode
-from sqlalchemy.ext.asyncio import AsyncSession
+
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from libs.schemas.agent_envelope import AgentRequest, AgentResponse, DataTier, RiskLevel
 from libs.schemas.user_profile import UserProfile
+from libs.telemetry.langfuse_handler import flush as lf_flush, get_callback_handler
 from libs.telemetry.tracing import start_span
 from services.agent.config import LLMConfig
 from services.agent.context import compact_messages
@@ -60,8 +62,8 @@ class BaseAgent(ABC):
     AGENT_ID: str
     CAPABILITIES: list[str]
 
-    def __init__(self, session: AsyncSession, config: LLMConfig | None = None) -> None:
-        self._session = session
+    def __init__(self, session_factory: async_sessionmaker, config: LLMConfig | None = None) -> None:
+        self._session_factory = session_factory
         self._config = config or agent_llm_config(self.AGENT_ID)
         self._llm = self._config.build_chat_model()
         self._planner = PlannerNode(llm=self._llm)
@@ -75,6 +77,21 @@ class BaseAgent(ABC):
     @abstractmethod
     def _build_tools(self) -> list:
         """Return LangChain-compatible tools for this agent's domain."""
+
+    def _make_tool_bound(self, fn) -> Any:
+        """Return an async callable that opens a fresh session per invocation.
+
+        This prevents concurrent tool calls from sharing an AsyncSession, which
+        causes SQLAlchemy IllegalStateChangeError when ToolNode runs tools via
+        asyncio.gather.
+        """
+        sf = self._session_factory
+
+        async def _bound(**kwargs):
+            async with sf() as session:
+                return (await fn(session=session, **kwargs)).to_llm_str()
+
+        return _bound
 
     def _system_prompt(self, user_profile: UserProfile) -> str:
         """Override to inject domain-specific instructions."""
@@ -154,12 +171,22 @@ class BaseAgent(ABC):
         all_warnings: list[str] = []
         tool_freshness: list[datetime] = []
 
+        # Build Langfuse callback scoped to this agent run.
+        # All LLM calls and tool calls inside the LangGraph loop are recorded
+        # as children of the orchestrator trace that owns request.trace_id.
+        lf_handler = get_callback_handler(
+            trace_id=str(request.trace_id),
+            user_id=str(request.user_profile.owner_id),
+            metadata={"agent_id": self.AGENT_ID, "query_preview": request.query[:80]},
+        )
+        lf_callbacks = [lf_handler] if lf_handler is not None else []
+
         for iteration in range(_MAX_REFLECT + 1):
             messages, _ = await compact_messages(messages, self._llm)
 
             graph_state = await self._graph.ainvoke(
                 {"messages": messages},
-                config={"recursion_limit": _RECURSION_LIMIT},
+                config={"recursion_limit": _RECURSION_LIMIT, "callbacks": lf_callbacks},
             )
 
             final_messages = graph_state["messages"]
@@ -205,6 +232,9 @@ class BaseAgent(ABC):
                 ]
 
         risk_level = _risk_from_confidence(best_confidence)
+        # Flush Langfuse so LLM/tool spans from this agent run reach the
+        # dashboard before the batch timer fires.
+        lf_flush()
         return best_result, best_confidence, risk_level, best_reasoning, all_warnings, tool_freshness
 
     # ------------------------------------------------------------------

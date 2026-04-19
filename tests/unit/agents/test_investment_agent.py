@@ -33,7 +33,7 @@ def _make_agent() -> InvestmentAgent:
     mock_llm.bind_tools = MagicMock(return_value=mock_llm)
     with patch("services.agents._common.base_agent.agent_llm_config") as mock_cfg:
         mock_cfg.return_value.build_chat_model.return_value = mock_llm
-        return InvestmentAgent(session=MagicMock())
+        return InvestmentAgent(session_factory=MagicMock())
 
 
 def test_build_tools_names():

@@ -9,6 +9,12 @@ from contextlib import asynccontextmanager
 
 import os
 
+from dotenv import load_dotenv
+
+# Load .env before any module reads os.getenv() — a no-op when env vars are
+# already injected by Docker Compose (load_dotenv does not override existing vars).
+load_dotenv()
+
 import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI
@@ -31,6 +37,7 @@ from api.routers.profile import router as profile_router
 from api.routers.registry import router as registry_router
 from api.routers.static_data import router as static_data_router
 from api.routers.transactions import router as transactions_router
+from libs.telemetry.langfuse_handler import flush as lf_flush
 from libs.telemetry.logging import configure_logging
 from libs.telemetry.tracing import configure_tracing
 from services.orchestrator.breaker import BreakerConfig, InMemoryBreakerStore
@@ -71,6 +78,7 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ─────────────────────────────────────────────────
     scheduler.shutdown(wait=False)
     await redis_client.aclose()
+    lf_flush()  # drain any buffered Langfuse events before the process exits
     log.info("artha.stopped")
 
 

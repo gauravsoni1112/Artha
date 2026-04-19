@@ -31,6 +31,13 @@ from services.agent.tools.emergency_fund_months import run as emergency_fund_mon
 from services.agent.tools.asset_concentration import run as asset_concentration_run
 from services.agent.tools.debt_to_income import run as debt_to_income_run
 from services.agent.tools.insurance_coverage_gap import run as insurance_coverage_gap_run
+# Pure-math tools (session-less, prevent LLM from doing arithmetic inline)
+from services.agent.tools.calculate import (
+    run_convert as convert_amount_run,
+    run_percentage as calculate_percentage_run,
+    run_growth as calculate_growth_run,
+    run_compound_interest as calculate_compound_interest_run,
+)
 
 
 # ── Input schemas (used by LangGraph for JSON schema extraction) ───────────────
@@ -113,6 +120,31 @@ class InsuranceCoverageGapInput(BaseModel):
     existing_health_cover_paise: int = Field(0, description="Current health insurance sum insured in paise")
 
 
+class ConvertAmountInput(BaseModel):
+    amount: float = Field(description="Numeric value to convert, e.g. 5.0 for '5 lakhs'")
+    from_unit: str = Field(description="Source denomination: 'paise', 'rupee', 'lakh', or 'crore'")
+    to_unit: str = Field(description="Target denomination: 'paise', 'rupee', 'lakh', or 'crore'")
+
+
+class CalculatePercentageInput(BaseModel):
+    base_paise: int = Field(description="Base amount in paise, e.g. 20000000 for ₹2,00,000")
+    percent: float = Field(description="Percentage to compute, e.g. 15.5 for 15.5%")
+
+
+class CalculateGrowthInput(BaseModel):
+    from_paise: int = Field(description="Starting amount in paise")
+    to_paise: int = Field(description="Ending amount in paise")
+
+
+class CalculateCompoundInterestInput(BaseModel):
+    principal_paise: int = Field(description="Principal amount in paise")
+    annual_rate_pct: float = Field(description="Annual interest rate in percent, e.g. 7.5")
+    years: float = Field(description="Investment horizon in years, e.g. 3.5 for 3.5 years")
+    compounding_frequency: int = Field(
+        12, description="Compoundings per year: 1=annual, 4=quarterly, 12=monthly, 365=daily"
+    )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 ToolFn = Callable[..., Coroutine[Any, Any, ToolResult]]
@@ -133,6 +165,11 @@ TOOL_REGISTRY: dict[str, tuple[ToolFn, type[BaseModel]]] = {
     "asset_concentration": (asset_concentration_run, AssetConcentrationInput),
     "debt_to_income": (debt_to_income_run, DebtToIncomeInput),
     "insurance_coverage_gap": (insurance_coverage_gap_run, InsuranceCoverageGapInput),
+    # Pure-math tools — the LLM must use these instead of computing inline
+    "convert_amount": (convert_amount_run, ConvertAmountInput),
+    "calculate_percentage": (calculate_percentage_run, CalculatePercentageInput),
+    "calculate_growth": (calculate_growth_run, CalculateGrowthInput),
+    "calculate_compound_interest": (calculate_compound_interest_run, CalculateCompoundInterestInput),
 }
 
 

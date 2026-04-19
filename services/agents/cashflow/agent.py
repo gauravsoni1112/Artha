@@ -53,19 +53,12 @@ class CashflowAgent(BaseAgent):
     CAPABILITIES = ["cashflow", "spending", "budget"]
 
     def _build_tools(self) -> list[StructuredTool]:
-        """Return the 5 cashflow-domain LangChain tools with the DB session bound."""
-        session = self._session
-        tools = []
-        for name, fn, schema in _CASHFLOW_TOOLS:
-            async def _bound(session=session, fn=fn, **kwargs):
-                return (await fn(session=session, **kwargs)).to_llm_str()
-
-            tools.append(
-                StructuredTool(
-                    name=name,
-                    description=fn.__doc__ or name,
-                    args_schema=schema,
-                    coroutine=_bound,
-                )
+        return [
+            StructuredTool(
+                name=name,
+                description=fn.__doc__ or name,
+                args_schema=schema,
+                coroutine=self._make_tool_bound(fn),
             )
-        return tools
+            for name, fn, schema in _CASHFLOW_TOOLS
+        ]

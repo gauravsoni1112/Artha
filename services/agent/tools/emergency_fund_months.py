@@ -71,7 +71,7 @@ async def run(
                 .group_by(Transaction.transaction_type)
             )
             for txn_type, total in (await session.execute(balance_stmt)).all():
-                total = total or 0
+                total = int(total or 0)
                 if txn_type == "CREDIT":
                     liquid_balance_paise += total
                 else:

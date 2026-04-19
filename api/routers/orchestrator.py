@@ -36,6 +36,7 @@ from libs.schemas.db_models import (
 )
 from libs.schemas.enums import RecommendationState
 from libs.schemas.user_profile import EMI, FinancialGoal, IncomeSource, UserProfile
+from libs.telemetry.langfuse_handler import create_trace, flush as lf_flush
 from libs.telemetry.tracing import start_span
 from services.orchestrator.audit import (
     InvalidTransitionError,
@@ -215,6 +216,16 @@ async def create_recommendation_endpoint(
     """
     trace_id = uuid.uuid4()
 
+    # Open a top-level Langfuse trace. All domain agents share the same
+    # trace_id so their LLM/tool spans appear nested under this trace.
+    lf_trace = create_trace(
+        trace_id=str(trace_id),
+        name="orchestrator.recommendation",
+        user_id=str(body.owner_id),
+        input={"query": body.query},
+        metadata={"owner_id": str(body.owner_id)},
+    )
+
     with start_span("orchestrator.recommend", {"owner_id": str(body.owner_id), "trace_id": str(trace_id)}):
 
         # 1. Load user profile
@@ -237,7 +248,7 @@ async def create_recommendation_endpoint(
             snapshot = await create_snapshot(session, profile_id, pydantic_profile)
 
         # 3. Decompose
-        available_agents: list[RegisteredAgent] = registry.list_available()
+        available_agents: list[RegisteredAgent] = registry.list_avaxilable()
         with start_span("planner.decompose", {"agent_count": str(len(available_agents))}):
             plan = decompose(body.query, scope, available_agents)
 
@@ -279,6 +290,21 @@ async def create_recommendation_endpoint(
                 critic_result=critic_result,
             )
             await session.commit()
+
+        # Finalise the Langfuse trace with the orchestrator's output summary,
+        # then flush so events appear in the dashboard without waiting for the
+        # background batch timer.
+        if lf_trace is not None:
+            lf_trace.update(
+                output={
+                    "recommendation_id": str(rec.id),
+                    "final_confidence": round(critic_result.final_confidence / 100.0, 4),
+                    "agents_called": plan.agent_ids(),
+                    "gaps": critic_result.gaps,
+                    "critic_penalty": round(critic_result.total_penalty / 100.0, 4),
+                }
+            )
+        lf_flush()
 
         # Record metrics
         record_recommendation(

@@ -1,12 +1,21 @@
 "use client";
-
-import React, { useRef, useState } from "react";
-import { Loader2, RefreshCw, Send, Sparkles } from "lucide-react";
+/**
+ * AskArtha — dashboard mini-launcher.
+ *
+ * Shows the most recent exchange from the shared thread, with a composer
+ * to continue the conversation. Clicking "Open chat" navigates to
+ * /advisory/chat for the full threaded experience.
+ */
+import React, { useState } from "react";
+import Link from "next/link";
+import { ArrowUpRight, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { RecommendationCard } from "./RecommendationCard";
+import { ChatComposer } from "./ChatComposer";
+import { AgentTimeline } from "./AgentTimeline";
+import { useChatThread } from "@/lib/chat";
 import { useAskArtha } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
+import { confidenceColor, formatConfidence } from "@/lib/format";
 import type { RecommendationResponse } from "@/lib/types";
 
 const QUICK_CHIPS = [
@@ -14,44 +23,114 @@ const QUICK_CHIPS = [
   "Am I on track for my goals?",
   "What's my tax liability this year?",
   "Is my emergency fund adequate?",
-  "How diversified is my portfolio?",
 ];
+
+function extractContent(response: RecommendationResponse): string {
+  const outputs = response.agent_outputs_json ?? [];
+  const answers = outputs
+    .filter((ao) => !ao.error && ao.response?.result)
+    .map((ao) => {
+      const result = ao.response?.result as Record<string, unknown>;
+      return typeof result?.answer === "string" ? result.answer : "";
+    })
+    .filter(Boolean);
+  return answers.join("\n\n") || "Analysis complete.";
+}
 
 export function AskArtha() {
   const { owner } = useAuth();
-  const [query, setQuery] = useState("");
-  const [result, setResult] = useState<{ q: string; r: RecommendationResponse } | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { messages, addMessage, clearThread, hydrated } = useChatThread();
+  const [input, setInput] = useState("");
   const mutation = useAskArtha();
 
-  async function submit(q: string) {
-    const trimmed = q.trim();
-    if (!trimmed || !owner) return;
-    setResult(null);
+  // Find the last assistant message to preview
+  const lastPair = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") {
+        const assistant = messages[i];
+        const user = messages[i - 1]?.role === "user" ? messages[i - 1] : null;
+        return { user, assistant };
+      }
+    }
+    return null;
+  })();
+
+  async function handleSubmit() {
+    const query = input.trim();
+    if (!query || !owner || mutation.isPending) return;
+    setInput("");
+
+    addMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      content: query,
+      timestamp: new Date().toISOString(),
+    });
+
+    const assistantId = crypto.randomUUID();
     try {
-      const res = await mutation.mutateAsync({ owner_id: owner.owner_id, query: trimmed });
-      setResult({ q: trimmed, r: res });
-    } catch {
-      // error shown via mutation.isError
+      const response = await mutation.mutateAsync({
+        owner_id: owner.owner_id,
+        query,
+      });
+      addMessage({
+        id: assistantId,
+        role: "assistant",
+        content: extractContent(response),
+        timestamp: new Date().toISOString(),
+        recommendation_id: response.recommendation_id,
+        response,
+      });
+    } catch (err) {
+      addMessage({
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date().toISOString(),
+        error: err instanceof Error ? err.message : "Something went wrong.",
+      });
     }
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    submit(query);
-  }
-
   function handleChip(chip: string) {
-    setQuery(chip);
-    submit(chip);
+    setInput(chip);
+    // submit after state settles
+    setTimeout(() => {
+      if (!owner || mutation.isPending) return;
+      const query = chip.trim();
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: query,
+        timestamp: new Date().toISOString(),
+      });
+      const assistantId = crypto.randomUUID();
+      mutation
+        .mutateAsync({ owner_id: owner.owner_id, query })
+        .then((response) =>
+          addMessage({
+            id: assistantId,
+            role: "assistant",
+            content: extractContent(response),
+            timestamp: new Date().toISOString(),
+            recommendation_id: response.recommendation_id,
+            response,
+          })
+        )
+        .catch((err) =>
+          addMessage({
+            id: assistantId,
+            role: "assistant",
+            content: "",
+            timestamp: new Date().toISOString(),
+            error: err instanceof Error ? err.message : "Something went wrong.",
+          })
+        );
+      setInput("");
+    }, 0);
   }
 
-  function handleReset() {
-    setResult(null);
-    setQuery("");
-    mutation.reset();
-    setTimeout(() => textareaRef.current?.focus(), 50);
-  }
+  if (!hydrated) return null;
 
   return (
     <div className="flex flex-col h-full gap-3">
@@ -61,53 +140,119 @@ export function AskArtha() {
           <Sparkles className="h-4 w-4 text-primary" />
           <h2 className="text-sm font-semibold">Ask Artha</h2>
         </div>
-        {result && (
-          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleReset}>
-            <RefreshCw className="h-3 w-3 mr-1" />
-            New
+        <div className="flex items-center gap-1">
+          {messages.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={clearThread}
+              title="Clear thread"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1" asChild>
+            <Link href="/advisory/chat">
+              Open chat
+              <ArrowUpRight className="h-3 w-3" />
+            </Link>
           </Button>
-        )}
+        </div>
       </div>
 
       {/* Content area */}
-      <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {mutation.isPending && (
-          <div className="flex flex-col items-center justify-center flex-1 gap-2 text-muted-foreground">
-            <Loader2 className="h-6 w-6 animate-spin" />
-            <p className="text-sm">Analysing across agents…</p>
+          <div className="flex flex-col gap-3 pt-2">
+            {lastPair?.user && (
+              <div className="flex justify-end">
+                <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-primary px-3.5 py-2 text-xs text-primary-foreground">
+                  {lastPair.user.content}
+                </div>
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+              <div className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50 animate-bounce"
+                    style={{ animationDelay: `${i * 150}ms` }}
+                  />
+                ))}
+              </div>
+              <span>Analysing across agents…</span>
+            </div>
           </div>
         )}
 
-        {mutation.isError && !mutation.isPending && (
-          <div className="flex flex-col items-center justify-center flex-1 gap-2">
-            <p className="text-sm text-red-500 text-center px-4">
-              {mutation.error instanceof Error
-                ? mutation.error.message
-                : "Something went wrong. Try again."}
-            </p>
-            <Button variant="outline" size="sm" onClick={handleReset}>
-              Try again
-            </Button>
+        {!mutation.isPending && lastPair && (
+          <div className="flex flex-col gap-2.5 pt-1">
+            {/* Last user query */}
+            {lastPair.user && (
+              <div className="flex justify-end">
+                <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-primary px-3.5 py-2 text-xs text-primary-foreground leading-relaxed">
+                  {lastPair.user.content}
+                </div>
+              </div>
+            )}
+
+            {/* Last assistant answer */}
+            <div className="rounded-2xl rounded-tl-sm border bg-card/50 px-3.5 py-3 text-xs leading-relaxed space-y-2 shadow-sm">
+              {lastPair.assistant.error ? (
+                <p className="text-red-500">{lastPair.assistant.error}</p>
+              ) : (
+                <>
+                  <p className="whitespace-pre-wrap line-clamp-6">
+                    {lastPair.assistant.content}
+                  </p>
+                  {lastPair.assistant.response && (
+                    <div className="flex items-center gap-2 pt-1 border-t">
+                      <span
+                        className={`font-medium tabular-nums ${confidenceColor(
+                          lastPair.assistant.response.final_confidence
+                        )}`}
+                      >
+                        {formatConfidence(
+                          lastPair.assistant.response.final_confidence
+                        )}{" "}
+                        confidence
+                      </span>
+                      <span className="text-muted-foreground">·</span>
+                      <AgentTimeline
+                        isPending={false}
+                        outputs={lastPair.assistant.response.agent_outputs_json}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {messages.length > 2 && (
+              <Link
+                href="/advisory/chat"
+                className="text-center text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                View full conversation ({Math.floor(messages.length / 2)} exchanges) →
+              </Link>
+            )}
           </div>
         )}
 
-        {result && !mutation.isPending && (
-          <div className="flex-1 overflow-y-auto pr-0.5">
-            <RecommendationCard query={result.q} response={result.r} />
-          </div>
-        )}
-
-        {!result && !mutation.isPending && !mutation.isError && (
-          <div className="flex flex-col items-center justify-center flex-1 gap-4 text-muted-foreground">
-            <p className="text-sm text-center px-2 leading-relaxed">
+        {!mutation.isPending && !lastPair && (
+          <div className="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground py-6">
+            <p className="text-xs text-center px-2 leading-relaxed">
               Ask a question about your finances. Artha will analyse your data across all domain agents.
             </p>
-            <div className="flex flex-wrap gap-2 justify-center">
+            <div className="flex flex-wrap gap-1.5 justify-center">
               {QUICK_CHIPS.map((chip) => (
                 <button
                   key={chip}
                   onClick={() => handleChip(chip)}
-                  className="text-xs bg-secondary text-secondary-foreground rounded-full px-3 py-1.5 hover:bg-secondary/80 transition-colors text-left"
+                  disabled={mutation.isPending}
+                  className="text-xs bg-secondary text-secondary-foreground rounded-full px-3 py-1.5 hover:bg-secondary/80 transition-colors text-left disabled:opacity-50"
                 >
                   {chip}
                 </button>
@@ -117,34 +262,16 @@ export function AskArtha() {
         )}
       </div>
 
-      {/* Input */}
-      <form onSubmit={handleSubmit} className="flex gap-2 shrink-0">
-        <Textarea
-          ref={textareaRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
+      {/* Composer */}
+      <div className="shrink-0">
+        <ChatComposer
+          value={input}
+          onChange={setInput}
+          onSubmit={handleSubmit}
+          isPending={mutation.isPending}
           placeholder="Ask about your finances…"
-          className="min-h-[56px] max-h-[120px]"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit(query);
-            }
-          }}
         />
-        <Button
-          type="submit"
-          disabled={!query.trim() || mutation.isPending}
-          size="icon"
-          className="shrink-0 h-14 w-10"
-        >
-          {mutation.isPending ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Send className="h-4 w-4" />
-          )}
-        </Button>
-      </form>
+      </div>
     </div>
   );
 }

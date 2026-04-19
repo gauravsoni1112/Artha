@@ -216,3 +216,17 @@ export interface QuarantineRecord {
   quarantine_status: string;
   created_at: string;
 }
+
+// ── Chat thread ──────────────────────────────────────────────────────────────
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  /** User query text, or the extracted natural-language answer for assistant. */
+  content: string;
+  timestamp: string;
+  recommendation_id?: string;
+  /** Full orchestrator response stored on assistant messages. */
+  response?: RecommendationResponse;
+  error?: string;
+}

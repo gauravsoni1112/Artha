@@ -70,8 +70,7 @@ def test_cashflow_tools_have_schemas():
 
 
 def _make_agent() -> CashflowAgent:
-    """Construct CashflowAgent with a mocked session and LLM."""
-    mock_session = MagicMock()
+    """Construct CashflowAgent with a mocked session factory and LLM."""
     mock_llm = MagicMock()
     mock_llm.bind_tools = MagicMock(return_value=mock_llm)
 
@@ -79,7 +78,7 @@ def _make_agent() -> CashflowAgent:
         "services.agents._common.base_agent.agent_llm_config"
     ) as mock_cfg:
         mock_cfg.return_value.build_chat_model.return_value = mock_llm
-        agent = CashflowAgent(session=mock_session)
+        agent = CashflowAgent(session_factory=MagicMock())
     return agent
 
 

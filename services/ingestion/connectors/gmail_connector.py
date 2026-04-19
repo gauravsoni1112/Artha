@@ -69,7 +69,7 @@ def _passwords_for_sender(sender_email: str) -> list[str]:
     """
     if not sender_email:
         return []
-    raw = os.getenv(f"PDF_PASSWORD_{sender_email}", "")
+    raw = os.getenv(f"PDF_PASSWORD_{sender_email.replace('@', '_AT_')}", "")
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 

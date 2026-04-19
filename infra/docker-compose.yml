@@ -33,7 +33,15 @@ x-llm-env: &llm-env
   LLM_API_KEY: ${LLM_API_KEY:-}
 
 x-tracing-env: &tracing-env
-  OTLP_ENDPOINT: http://jaeger:4317
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+
+x-langfuse-env: &langfuse-env
+  # Use the Docker-internal hostname so containers can reach the langfuse service.
+  # LANGFUSE_HOST from .env is the browser-facing URL (localhost:3001) and cannot
+  # be used inside Docker — it would resolve to the container's own loopback.
+  LANGFUSE_HOST: http://langfuse:3000
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
 
 x-agent-tune-env: &agent-tune-env
   REFLECTION_THRESHOLD: ${REFLECTION_THRESHOLD:-0.7}
@@ -118,6 +126,44 @@ services:
     depends_on:
       - prometheus
 
+  # ── Langfuse — LLM observability UI ─────────────────────────────────────────
+  # Open http://localhost:3001 after first boot, create an org + project, then
+  # copy the Public Key / Secret Key into your .env as LANGFUSE_PUBLIC_KEY /
+  # LANGFUSE_SECRET_KEY.  The artha services read those env vars at startup.
+
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse_secret
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    networks:
+      - artha_data_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  langfuse:
+    image: langfuse/langfuse:2
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse_secret@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change_this_in_production_32chars}
+      SALT: ${LANGFUSE_SALT:-change_this_in_production_salt}
+      NEXTAUTH_URL: http://localhost:3001
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+    networks:
+      - artha_data_net
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+
   # Ollama — shared local LLM (default provider for all agents)
   # Override with LLM_PROVIDER=anthropic / openai env vars to skip.
   ollama:
@@ -142,7 +188,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env]
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env]
       FILE_STORE_KEY: ${FILE_STORE_KEY:-tRlwcGp_9Xgkykc4hyrpOpmbK1RRC-Oiolpc3IE2mPU=}
       GMAIL_CLIENT_SECRETS: ${GMAIL_CLIENT_SECRETS:-}
       GMAIL_TOKEN_PATH: ${GMAIL_TOKEN_PATH:-}
@@ -178,7 +224,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: cashflow_agent
       AGENT_ENDPOINT: http://cashflow_agent:8001
       AGENT_CAPABILITIES: cashflow,spending,budget
@@ -210,7 +256,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: investment_agent
       AGENT_ENDPOINT: http://investment_agent:8002
       AGENT_CAPABILITIES: investment,portfolio,net_worth
@@ -238,7 +284,7 @@ services:
     ports:
       - "8003:8003"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: tax_agent
       AGENT_ENDPOINT: http://tax_agent:8003
       AGENT_CAPABILITIES: tax,itr,fiscal
@@ -266,7 +312,7 @@ services:
     ports:
       - "8004:8004"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: risk_agent
       AGENT_ENDPOINT: http://risk_agent:8004
       AGENT_CAPABILITIES: risk,insurance,emergency_fund,debt
@@ -294,7 +340,7 @@ services:
     ports:
       - "8005:8005"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: goal_agent
       AGENT_ENDPOINT: http://goal_agent:8005
       AGENT_CAPABILITIES: goal,planning,savings
@@ -338,3 +384,4 @@ volumes:
   redis_data:
   grafana_data:
   ollama_data:
+  langfuse_db_data:

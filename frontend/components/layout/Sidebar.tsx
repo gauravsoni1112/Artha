@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   List,
+  MessageSquare,
   TrendingUp,
   Target,
   FileText,
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/advisory/chat", label: "AI Chat", icon: MessageSquare },
   { href: "/transactions", label: "Transactions", icon: List },
   { href: "/investments", label: "Investments", icon: TrendingUp },
   { href: "/goals", label: "Goals", icon: Target },

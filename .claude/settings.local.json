@@ -37,7 +37,32 @@
       "Bash(git commit:*)",
       "Bash(ls .env*)",
       "Bash(ls Dockerfile*)",
-      "Bash(ls infra/Dockerfile*)"
+      "Bash(ls infra/Dockerfile*)",
+      "Bash(npx create-next-app@14 frontend --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --no-git --yes)",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(/Users/soni/Documents/workspace/Artha/frontend/node_modules/.bin/tsc --noEmit --project /Users/soni/Documents/workspace/Artha/frontend/tsconfig.json)",
+      "Bash(/Users/soni/Documents/workspace/Artha/frontend/node_modules/.bin/next build *)",
+      "Bash(/Users/soni/Documents/workspace/Artha/frontend/node_modules/.bin/next dev *)",
+      "Bash(npm run *)",
+      "Bash(xargs ls *)",
+      "Bash(PGPASSWORD=artha_secret psql *)",
+      "Bash(docker exec infra-postgres-1 *)",
+      "Bash(cat /Users/soni/Documents/workspace/Artha/frontend/.env*)",
+      "Bash(lsof -iTCP -sTCP:LISTEN -nP)",
+      "Bash(docker exec *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git push *)",
+      "Bash(npx next *)",
+      "Bash(chmod +x *)",
+      "Bash(.venv/bin/pip show *)",
+      "Bash(.venv/bin/pip index *)",
+      "Bash(docker pull *)",
+      "Bash(docker run *)",
+      "Bash(nc *)",
+      "Bash(git reset *)",
+      "Bash(git checkout *)",
+      "Bash(git clean *)"
     ]
   }
 }
