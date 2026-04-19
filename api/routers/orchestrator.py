@@ -248,7 +248,7 @@ async def create_recommendation_endpoint(
             snapshot = await create_snapshot(session, profile_id, pydantic_profile)
 
         # 3. Decompose
-        available_agents: list[RegisteredAgent] = registry.list_avaxilable()
+        available_agents: list[RegisteredAgent] = registry.list_available()
         with start_span("planner.decompose", {"agent_count": str(len(available_agents))}):
             plan = decompose(body.query, scope, available_agents)
 
