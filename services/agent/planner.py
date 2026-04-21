@@ -102,12 +102,13 @@ class PlannerNode:
     async def acall(self, state: dict, **kwargs) -> dict:
         """Async node callable."""
         messages = state.get("messages", [])
+        callbacks = kwargs.get("callbacks", [])
         last_human = next(
             (m for m in reversed(messages) if isinstance(m, HumanMessage)),
             None,
         )
         question = last_human.content if last_human else ""
-        plan = await self._aplan(question)
+        plan = await self._aplan(question, callbacks=callbacks)
         log.info("planner.produced", steps=len(plan.steps), reasoning=plan.reasoning)
         return {"plan": plan, "messages": messages}
 
@@ -119,12 +120,13 @@ class PlannerNode:
         response = self._llm.invoke(prompt)
         return self._parse_response(response.content, question)
 
-    async def _aplan(self, question: str) -> Plan:
+    async def _aplan(self, question: str, callbacks: list | None = None) -> Plan:
         prompt = [
             SystemMessage(content=_PLANNER_SYSTEM),
             HumanMessage(content=question),
         ]
-        response = await self._llm.ainvoke(prompt)
+        lf_config = {"callbacks": callbacks} if callbacks else {}
+        response = await self._llm.ainvoke(prompt, config=lf_config)
         return self._parse_response(response.content, question)
 
     def _parse_response(self, content: str, original_question: str) -> Plan:

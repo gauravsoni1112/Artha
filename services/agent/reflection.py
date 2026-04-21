@@ -120,6 +120,7 @@ class ReflectionNode:
     async def acall(self, state: dict, **kwargs) -> dict:
         messages = state.get("messages", [])
         reflect_count: int = state.get("reflect_count", 0)
+        callbacks = kwargs.get("callbacks", [])
 
         # Extract the original question and draft answer
         question = ""
@@ -135,7 +136,7 @@ class ReflectionNode:
             if content and not isinstance(m, HumanMessage):
                 draft_answer = content  # keep updating — we want the last AI content
 
-        result = await self._evaluate(question, draft_answer)
+        result = await self._evaluate(question, draft_answer, callbacks=callbacks)
 
         # Decide whether to re-run
         if not result.is_complete and reflect_count < MAX_REFLECT_ITERATIONS:
@@ -163,7 +164,7 @@ class ReflectionNode:
             "messages": messages,
         }
 
-    async def _evaluate(self, question: str, draft_answer: str) -> ReflectionResult:
+    async def _evaluate(self, question: str, draft_answer: str, callbacks: list | None = None) -> ReflectionResult:
         if not draft_answer:
             return ReflectionResult.fallback()
 
@@ -177,7 +178,8 @@ class ReflectionNode:
             ),
         ]
         try:
-            response = await self._llm.ainvoke(prompt)
+            lf_config = {"callbacks": callbacks} if callbacks else {}
+            response = await self._llm.ainvoke(prompt, config=lf_config)
             return self._parse(response.content)
         except Exception as exc:
             log.warning("reflection.llm_error", error=str(exc))
