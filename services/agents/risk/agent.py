@@ -65,7 +65,7 @@ class RiskAgent(BaseAgent):
             "Use tools to retrieve real data — never guess amounts. "
             f"The user's annual income is approximately ₹{annual_income_paise / 100:,.0f}. "
             f"Family scope: {'yes' if user_profile.is_family_scope else 'no'}. "
-            f"CRITICAL: Always pass owner_id={owner_id} when calling ANY tool. "
+            f"CRITICAL: ALWAYS pass owner_id={owner_id} when calling ANY tool — it is REQUIRED. "
             "When calling insurance_coverage_gap, also pass annual_income_paise="
             f"{annual_income_paise} and is_family_scope={str(user_profile.is_family_scope).lower()}. "
             "Express amounts in Indian Rupee format (₹X,XX,XXX.XX). "
