@@ -30,7 +30,11 @@ _KEY_PREFIX = "artha:agent"
 
 
 def _cache_key(agent_id: str, request: AgentRequest) -> str:
-    content = f"{agent_id}:{request.query}:{request.user_profile.owner_id}"
+    # Sort allowed_owner_ids so key is stable regardless of insertion order.
+    # allowed_owner_ids is injected into context by the dispatch layer.
+    raw_ids = request.context.get("allowed_owner_ids") or []
+    scope_str = ",".join(sorted(str(oid) for oid in raw_ids))
+    content = f"{agent_id}:{request.query}:{request.user_profile.owner_id}:{scope_str}"
     digest = hashlib.sha256(content.encode()).hexdigest()[:16]
     return f"{_KEY_PREFIX}:{agent_id}:{digest}"
 

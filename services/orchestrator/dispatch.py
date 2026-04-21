@@ -24,6 +24,7 @@ them to compose() (confidence) and the Critic before writing to the audit log.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from dataclasses import dataclass, field
 
@@ -39,6 +40,13 @@ from services.orchestrator.plan import AgentCall, Plan
 from services.orchestrator.registry import AgentRegistryCache
 
 log = structlog.get_logger(__name__)
+
+_AGENT_SECRET: str = os.getenv("ARTHA_AGENT_SECRET", "dev-agent-secret-change-me")
+
+# Module-level AsyncClient — reuses TCP connections across all agent dispatches
+# in a single orchestrator request instead of opening a new connection per call.
+# Timeout is set per-request via httpx.Timeout, so this client has no global timeout.
+_http_client: httpx.AsyncClient = httpx.AsyncClient(timeout=None)
 
 
 @dataclass
@@ -56,15 +64,18 @@ async def _call_agent_http(
     request: AgentRequest,
     timeout_ms: int,
 ) -> AgentResponse:
-    """Make a single HTTP call to an agent's /run endpoint."""
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{endpoint}/run",
-            json=request.model_dump(mode="json"),
-            timeout=timeout_ms / 1000.0,
-        )
-        resp.raise_for_status()
-        return AgentResponse.model_validate(resp.json())
+    """Make a single HTTP call to an agent's /run endpoint.
+
+    Uses the module-level AsyncClient to reuse TCP connections across calls.
+    """
+    resp = await _http_client.post(
+        f"{endpoint}/run",
+        json=request.model_dump(mode="json"),
+        headers={"X-Artha-Agent-Secret": _AGENT_SECRET},
+        timeout=httpx.Timeout(timeout_ms / 1000.0),
+    )
+    resp.raise_for_status()
+    return AgentResponse.model_validate(resp.json())
 
 
 async def _dispatch_one(

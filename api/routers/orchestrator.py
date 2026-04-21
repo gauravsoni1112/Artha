@@ -36,7 +36,7 @@ from libs.schemas.db_models import (
 )
 from libs.schemas.enums import RecommendationState
 from libs.schemas.user_profile import EMI, FinancialGoal, IncomeSource, UserProfile
-from libs.telemetry.langfuse_handler import create_trace, flush as lf_flush
+from libs.telemetry.langfuse_handler import create_trace, flush as lf_flush, score_trace
 from libs.telemetry.tracing import start_span
 from services.orchestrator.audit import (
     InvalidTransitionError,
@@ -48,6 +48,7 @@ from services.orchestrator.breaker import InMemoryBreakerStore
 from services.orchestrator.cache import AgentResponseCache
 from services.orchestrator.critic import evaluate as critic_evaluate
 from services.orchestrator.decompose import RegisteredAgent, decompose
+from services.orchestrator.synthesizer import synthesize
 from services.orchestrator.dispatch import dispatch_plan
 from services.orchestrator.metrics import (
     record_breaker_state,
@@ -101,6 +102,7 @@ class RecommendationResponse(BaseModel):
     warnings: list[str]
     gaps: list[str]
     final_output: dict[str, Any]
+    synthesized_answer: str = ""
     plan_json: dict[str, Any] | None = None
     agent_outputs_json: list[dict[str, Any]] | None = None
 
@@ -198,6 +200,7 @@ def _build_confidence_inputs(
 async def create_recommendation_endpoint(
     body: RecommendationRequest,
     request: Request,
+    owner: Annotated[Owner, Depends(current_owner)],
     session: AsyncSession = Depends(get_session),
     registry: AgentRegistryCache = Depends(get_registry),
     breaker: InMemoryBreakerStore = Depends(get_breaker),
@@ -214,6 +217,12 @@ async def create_recommendation_endpoint(
     6. Critic evaluate (consistency checks, downward adjustment)
     7. Audit write (recommendations + GENERATED event)
     """
+    if body.owner_id != owner.id:
+        raise HTTPException(
+            status_code=403,
+            detail="owner_id in request body does not match authenticated owner",
+        )
+
     trace_id = uuid.uuid4()
 
     # Open a top-level Langfuse trace. All domain agents share the same
@@ -277,8 +286,34 @@ async def create_recommendation_endpoint(
         # 6. Critic
         with start_span("critic.evaluate"):
             critic_result = critic_evaluate(body.query, dispatched_results, baseline)
+        if lf_trace is not None:
+            try:
+                cs = lf_trace.span(
+                    name="orchestrator/critic",
+                    input={
+                        "baseline_confidence": baseline.score,
+                        "agents": [r.agent_id for r in dispatched_results],
+                    },
+                    output={
+                        "final_confidence": critic_result.final_confidence,
+                        "total_penalty": critic_result.total_penalty,
+                        "flags": [f.check_type for f in critic_result.consistency_flags],
+                        "gaps": critic_result.gaps,
+                        "warnings": critic_result.warnings,
+                    },
+                    metadata={"node": "critic"},
+                )
+                cs.end()
+            except Exception:
+                pass
 
-        # 7. Audit write
+        # 7. Synthesize — merge all agent answers into one narrative
+        with start_span("synthesizer.run"):
+            synthesized_answer = await synthesize(
+                body.query, dispatched_results, critic_result=critic_result, trace_id=str(trace_id)
+            )
+
+        # 8. Audit write
         with start_span("audit.write"):
             rec = await create_recommendation(
                 session,
@@ -288,6 +323,7 @@ async def create_recommendation_endpoint(
                 plan=plan,
                 dispatched_results=dispatched_results,
                 critic_result=critic_result,
+                synthesized_answer=synthesized_answer,
             )
             await session.commit()
 
@@ -304,6 +340,14 @@ async def create_recommendation_endpoint(
                     "critic_penalty": round(critic_result.total_penalty / 100.0, 4),
                 }
             )
+        # Attach the orchestrator-level confidence score so it's queryable in
+        # the Langfuse dashboard alongside per-agent confidence scores.
+        score_trace(
+            str(trace_id),
+            name="orchestrator.confidence",
+            value=round(critic_result.final_confidence / 100.0, 4),
+            comment=f"baseline={round(baseline.score / 100.0, 4)} penalty={critic_result.total_penalty}pp",
+        )
         lf_flush()
 
         # Record metrics
@@ -341,6 +385,7 @@ async def create_recommendation_endpoint(
             warnings=critic_result.warnings,
             gaps=critic_result.gaps,
             final_output=normalised_final_output,
+            synthesized_answer=synthesized_answer,
             plan_json=rec.plan_json,
             agent_outputs_json=rec.agent_outputs_json,
         )
@@ -354,6 +399,7 @@ async def create_recommendation_endpoint(
 async def add_recommendation_event(
     recommendation_id: uuid.UUID,
     body: EventRequest,
+    owner: Annotated[Owner, Depends(current_owner)],
     session: AsyncSession = Depends(get_session),
 ) -> EventResponse:
     """
@@ -365,6 +411,12 @@ async def add_recommendation_event(
     Returns 422 if the transition is not allowed by the state machine.
     Returns 404 if the recommendation does not exist.
     """
+    if body.actor_user_id != owner.id:
+        raise HTTPException(
+            status_code=403,
+            detail="actor_user_id does not match authenticated owner",
+        )
+
     try:
         event = await transition_state(
             session,

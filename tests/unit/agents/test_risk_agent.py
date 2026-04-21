@@ -73,8 +73,11 @@ def test_risk_tools_have_schemas():
 def _make_agent() -> RiskAgent:
     mock_llm = MagicMock()
     mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-    with patch("services.agents._common.base_agent.agent_llm_config") as mock_cfg:
-        mock_cfg.return_value.build_chat_model.return_value = mock_llm
+    mock_policy = MagicMock()
+    mock_policy.build_chat_model.return_value = mock_llm
+    mock_policy.destination = "local"
+    with patch("services.agents._common.base_agent.RoutingPolicy") as mock_rp:
+        mock_rp.from_env.return_value = mock_policy
         return RiskAgent(session_factory=MagicMock())
 
 

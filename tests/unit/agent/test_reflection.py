@@ -206,7 +206,7 @@ async def test_acall_strips_owner_id_from_question():
     """owner_id token is stripped before sending question to reflection LLM."""
     captured_prompts = []
 
-    async def mock_ainvoke(prompts):
+    async def mock_ainvoke(prompts, **kwargs):
         captured_prompts.extend(prompts)
         m = MagicMock()
         m.content = json.dumps({"confidence_score": 0.9, "is_complete": True, "reflection_notes": ""})

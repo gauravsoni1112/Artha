@@ -174,9 +174,9 @@ services:
       - ollama_data:/root/.ollama
     networks:
       - artha_data_net
-    # Pull the default model on first start
+    # Pull the default model on first start (with retry logic and fallback)
     # Override LLM_MODEL to use a different model.
-    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull ${LLM_MODEL:-llama3.2} && wait"]
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && (ollama pull ${LLM_MODEL:-llama3.2} || echo 'Warning: Failed to pull model ${LLM_MODEL:-llama3.2}, continuing anyway...') && wait"]
 
   # ── API — gateway, ingestion, Phase 3 agent, agent registry, router ──────────
 

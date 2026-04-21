@@ -16,13 +16,14 @@ Usage in each agent's main.py:
 
 from __future__ import annotations
 
+import hmac
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Type
+from typing import Annotated, Type
 
 import structlog
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from libs.schemas.agent_envelope import AgentRequest, AgentResponse
@@ -30,6 +31,17 @@ from services.agents._common.base_agent import BaseAgent
 from services.agents._common.self_register import self_register
 
 log = structlog.get_logger(__name__)
+
+_AGENT_SECRET: str = os.getenv("ARTHA_AGENT_SECRET", "dev-agent-secret-change-me")
+
+
+def _verify_agent_secret(provided: str | None) -> None:
+    """Raise 401 if the caller did not supply the correct agent secret."""
+    if provided is None or not hmac.compare_digest(provided, _AGENT_SECRET):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid X-Artha-Agent-Secret",
+        )
 
 
 def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
@@ -40,8 +52,6 @@ def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
     gets its own AsyncSession (no shared state between requests).
     """
 
-    engine_holder: dict = {}
-
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         db_url = os.getenv(
@@ -49,10 +59,11 @@ def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
             "postgresql+asyncpg://artha:artha_secret@localhost:5432/artha",
         )
         engine = create_async_engine(db_url, pool_pre_ping=True)
-        engine_holder["engine"] = engine
-        engine_holder["session_factory"] = async_sessionmaker(
-            engine, expire_on_commit=False
-        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        # Build the agent once — LLM clients and LangGraph compiled here.
+        app.state.agent = agent_class(session_factory=session_factory)
+        app.state.engine = engine
 
         # Self-register with the registry (retries internally)
         skip_register = os.getenv("SKIP_AGENT_REGISTRATION", "false").lower() == "true"
@@ -78,12 +89,16 @@ def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
         return {"status": "ok", "agent_id": agent_class.AGENT_ID}
 
     @app.post("/run", response_model=AgentResponse)
-    async def run(request: AgentRequest) -> AgentResponse:
-        session_factory = engine_holder.get("session_factory")
-        if session_factory is None:
-            raise HTTPException(status_code=503, detail="DB session not initialised")
+    async def run(
+        request: AgentRequest,
+        x_artha_agent_secret: Annotated[str | None, Header(alias="X-Artha-Agent-Secret")] = None,
+    ) -> AgentResponse:
+        _verify_agent_secret(x_artha_agent_secret)
 
-        agent = agent_class(session_factory=session_factory)
+        agent: BaseAgent | None = getattr(app.state, "agent", None)
+        if agent is None:
+            raise HTTPException(status_code=503, detail="Agent not initialised")
+
         try:
             return await agent.run(request)
         except Exception as exc:

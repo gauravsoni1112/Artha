@@ -42,12 +42,12 @@ def agent_llm_config(agent_id: str) -> LLMConfig:
 
     provider = _get("PROVIDER", "LLM_PROVIDER", "ollama").lower()
 
-    _model_defaults: dict[str, str] = {
-        "anthropic": "claude-haiku-4-5-20251001",
-        "openai": "gpt-4o-mini",
-        "ollama": "llama3.2",
-    }
-    model = _get("MODEL", "LLM_MODEL", _model_defaults.get(provider, "llama3.2"))
+    model = os.getenv(f"{prefix}MODEL") or os.getenv("LLM_MODEL")
+    if not model:
+        raise ValueError(
+            f"No model configured for agent {agent_id!r}. "
+            f"Set {prefix}MODEL or LLM_MODEL in your .env."
+        )
     base_url = _get("BASE_URL", "LLM_BASE_URL", "http://localhost:11434")
     temperature = float(
         os.getenv(f"{prefix}TEMPERATURE")

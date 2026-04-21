@@ -99,7 +99,7 @@ class PlannerNode:
         log.info("planner.produced", steps=len(plan.steps), reasoning=plan.reasoning)
         return {"plan": plan, "messages": messages}
 
-    async def acall(self, state: dict) -> dict:
+    async def acall(self, state: dict, **kwargs) -> dict:
         """Async node callable."""
         messages = state.get("messages", [])
         last_human = next(

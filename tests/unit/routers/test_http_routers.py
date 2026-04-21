@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.database import get_session
+from api.deps import current_owner
 from api.routers.registry import router as registry_router
 from api.routers.agent_router import router as domain_router
 from libs.schemas.db_models import AgentRegistryEntry
@@ -400,14 +401,26 @@ from services.orchestrator.dispatch import DispatchedResult
 from libs.confidence.tier import FallbackTier
 
 
-def _orchestrator_client(mock_session, mock_registry=None, mock_breaker=None, mock_cache=None) -> TestClient:
+def _orchestrator_client(
+    mock_session,
+    mock_registry=None,
+    mock_breaker=None,
+    mock_cache=None,
+    owner_id: uuid.UUID | None = None,
+) -> TestClient:
     app = FastAPI()
     app.include_router(orchestrator_router)
 
     async def override_session():
         yield mock_session
 
+    from libs.schemas.db_models import Owner as _Owner
+    _mock_owner = _Owner()
+    _mock_owner.id = owner_id or uuid.uuid4()
+    _mock_owner.name = "Test User"
+
     app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[current_owner] = lambda: _mock_owner
 
     if mock_registry is not None:
         app.dependency_overrides[get_registry] = lambda: mock_registry
@@ -463,6 +476,7 @@ def _mock_dispatched_primary(agent_id: str = "cashflow_agent") -> DispatchedResu
 
 
 def test_create_recommendation_profile_not_found_404():
+    owner_id = uuid.uuid4()
     mock_session = AsyncMock()
     mock_session.scalar = AsyncMock(return_value=None)  # no profile
 
@@ -471,10 +485,10 @@ def test_create_recommendation_profile_not_found_404():
     mock_breaker = InMemoryBreakerStore(BreakerConfig())
     mock_cache = AsyncMock()
 
-    client = _orchestrator_client(mock_session, mock_registry, mock_breaker, mock_cache)
+    client = _orchestrator_client(mock_session, mock_registry, mock_breaker, mock_cache, owner_id=owner_id)
     resp = client.post(
         "/orchestrator/recommendation",
-        json={"owner_id": str(uuid.uuid4()), "query": "Should I increase SIP?"},
+        json={"owner_id": str(owner_id), "query": "Should I increase SIP?"},
     )
     assert resp.status_code == 404
     assert "profile" in resp.json()["detail"].lower()
@@ -531,7 +545,7 @@ def test_create_recommendation_success_201():
     dispatched = [_mock_dispatched_primary()]
     critic = _mock_critic_result()
 
-    client = _orchestrator_client(mock_session, mock_registry, mock_breaker, mock_cache)
+    client = _orchestrator_client(mock_session, mock_registry, mock_breaker, mock_cache, owner_id=owner_id)
 
     with (
         patch("api.routers.orchestrator.dispatch_plan", new=AsyncMock(return_value=dispatched)),
@@ -555,6 +569,7 @@ def test_add_event_invalid_transition_422():
     """GENERATED → ACCEPTED is invalid → 422."""
     from libs.schemas.db_models import Recommendation
 
+    actor_id = uuid.uuid4()
     rec = Recommendation()
     rec.id = uuid.uuid4()
     rec.current_state = RecommendationState.GENERATED.value
@@ -565,14 +580,14 @@ def test_add_event_invalid_transition_422():
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
 
-    client = _orchestrator_client(mock_session)
+    client = _orchestrator_client(mock_session, owner_id=actor_id)
     rec_id = uuid.uuid4()
 
     resp = client.post(
         f"/orchestrator/recommendation/{rec_id}/events",
         json={
             "event_type": "ACCEPTED",
-            "actor_user_id": str(uuid.uuid4()),
+            "actor_user_id": str(actor_id),
             "payload": {},
         },
     )
@@ -584,6 +599,7 @@ def test_add_event_valid_transition_200():
     """GENERATED → SURFACED is valid → 200."""
     from libs.schemas.db_models import Recommendation, RecommendationEvent
 
+    actor_id = uuid.uuid4()
     rec = Recommendation()
     rec.id = uuid.uuid4()
     rec.current_state = RecommendationState.GENERATED.value
@@ -594,13 +610,12 @@ def test_add_event_valid_transition_200():
     event.event_type = RecommendationState.SURFACED.value
 
     mock_session = AsyncMock()
-    # First get → rec (for transition_state), second get → rec (for current_state)
     mock_session.get = AsyncMock(return_value=rec)
     mock_session.add = MagicMock()
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
 
-    client = _orchestrator_client(mock_session)
+    client = _orchestrator_client(mock_session, owner_id=actor_id)
 
     with patch(
         "api.routers.orchestrator.transition_state",
@@ -610,7 +625,7 @@ def test_add_event_valid_transition_200():
             f"/orchestrator/recommendation/{rec.id}/events",
             json={
                 "event_type": "SURFACED",
-                "actor_user_id": str(uuid.uuid4()),
+                "actor_user_id": str(actor_id),
                 "payload": {},
             },
         )
@@ -621,12 +636,13 @@ def test_add_event_valid_transition_200():
 
 
 def test_add_event_recommendation_not_found_404():
+    actor_id = uuid.uuid4()
     mock_session = AsyncMock()
     mock_session.get = AsyncMock(return_value=None)
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
 
-    client = _orchestrator_client(mock_session)
+    client = _orchestrator_client(mock_session, owner_id=actor_id)
 
     with patch(
         "api.routers.orchestrator.transition_state",
@@ -636,7 +652,7 @@ def test_add_event_recommendation_not_found_404():
             f"/orchestrator/recommendation/{uuid.uuid4()}/events",
             json={
                 "event_type": "SURFACED",
-                "actor_user_id": str(uuid.uuid4()),
+                "actor_user_id": str(actor_id),
             },
         )
 

@@ -14,15 +14,19 @@ BaseAgent handles:
   - Confidence + risk scoring from the ReflectionNode
   - data_freshness computed from ToolResult timestamps
   - Structured logging + tracing spans
+  - Phase H3: per-role LLM routing, per-request PII anonymisation,
+    PII pre-flight scan before cloud calls, detokenisation of final answer
 """
 
 from __future__ import annotations
 
 import os
-import uuid
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -32,19 +36,24 @@ from langgraph.prebuilt import ToolNode
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from libs.privacy.anonymiser import default_anonymiser
+from libs.privacy.pii_scanner import default_scanner
+from libs.privacy.token_map import TokenMap
 from libs.schemas.agent_envelope import AgentRequest, AgentResponse, DataTier, RiskLevel
 from libs.schemas.user_profile import UserProfile
-from libs.telemetry.langfuse_handler import flush as lf_flush, get_callback_handler
+from libs.telemetry.langfuse_handler import (
+    create_trace,
+    end_callback_span,
+    get_callback_handler,
+    score_trace,
+)
 from libs.telemetry.tracing import start_span
-from services.agent.config import LLMConfig
+from services.agent.config import LLMConfig, LLMRole, RoutingPolicy
 from services.agent.context import compact_messages
-from services.agent.planner import PlannerNode
 from services.agent.reflection import ReflectionNode
-from services.agents._common.agent_config import agent_llm_config
 
 log = structlog.get_logger(__name__)
 
-# How many reflection iterations before we give up and return best effort
 _MAX_REFLECT = int(os.getenv("MAX_REFLECT_ITERATIONS", "2"))
 _REFLECT_THRESHOLD = float(os.getenv("REFLECTION_THRESHOLD", "0.7"))
 _RECURSION_LIMIT = int(os.getenv("AGENT_MAX_ITERATIONS", "10"))
@@ -64,10 +73,30 @@ class BaseAgent(ABC):
 
     def __init__(self, session_factory: async_sessionmaker, config: LLMConfig | None = None) -> None:
         self._session_factory = session_factory
-        self._config = config or agent_llm_config(self.AGENT_ID)
-        self._llm = self._config.build_chat_model()
-        self._planner = PlannerNode(llm=self._llm)
-        self._reflector = ReflectionNode(llm=self._llm)
+
+        if config is not None:
+            # Legacy / test path: single LLM for all roles
+            llm = config.build_chat_model()
+            self._executor_llm = llm
+            self._reflector_llm = llm
+            self._compactor_llm = llm
+            self._reflector_is_cloud = False
+        else:
+            executor_policy = RoutingPolicy.from_env(LLMRole.EXECUTOR)
+            reflector_policy = RoutingPolicy.from_env(LLMRole.REFLECTOR)
+            compactor_policy = RoutingPolicy.from_env(LLMRole.COMPACTOR)
+
+            self._executor_llm = executor_policy.build_chat_model()
+            self._reflector_llm = reflector_policy.build_chat_model()
+            self._compactor_llm = compactor_policy.build_chat_model()
+            self._reflector_is_cloud = reflector_policy.destination == "cloud"
+
+        # Backward-compat alias used by tests and tool helpers
+        self._llm = self._executor_llm
+
+        self._reflector = ReflectionNode(llm=self._reflector_llm)
+        # Local fallback reflector — used when cloud PII scan raises
+        self._local_reflector = ReflectionNode(llm=self._executor_llm)
         self._graph = self._build_graph()
 
     # ------------------------------------------------------------------
@@ -110,6 +139,19 @@ class BaseAgent(ABC):
 
     async def run(self, request: AgentRequest) -> AgentResponse:
         """Execute the agent for *request* and return an envelope response."""
+        tm = TokenMap()  # per-request token map — GC'd after this method returns
+
+        # Ensure a top-level Langfuse trace exists for this trace_id when the
+        # agent is called directly (i.e. not via the orchestrator, which normally
+        # creates the trace first). Langfuse dedupes on id so this is safe.
+        create_trace(
+            trace_id=str(request.trace_id),
+            name=f"{self.AGENT_ID}.run",
+            user_id=str(request.user_profile.owner_id),
+            input={"query": request.query[:120]},
+            metadata={"agent_id": self.AGENT_ID},
+        )
+
         with start_span(f"{self.AGENT_ID}.run", {"trace_id": str(request.trace_id)}):
             log.info(
                 "agent.run.start",
@@ -117,9 +159,13 @@ class BaseAgent(ABC):
                 trace_id=str(request.trace_id),
                 query=request.query[:120],
             )
-            result, confidence, risk_level, reasoning, warnings, tool_freshness = (
-                await self._execute(request)
+            result, confidence, risk_level, reasoning, warnings, tool_freshness, tools_used = (
+                await self._execute(request, tm)
             )
+
+            # Detokenise final answer if reflector was cloud (tokens may appear in output)
+            if self._reflector_is_cloud and result.get("answer"):
+                result = {**result, "answer": default_anonymiser.detokenise_answer(result["answer"], tm)}
 
             data_freshness_hours = _compute_freshness_hours(tool_freshness)
 
@@ -134,6 +180,7 @@ class BaseAgent(ABC):
                 risk_level=risk_level,
                 reasoning=reasoning,
                 warnings=warnings,
+                tools_used=tools_used,
             )
             log.info(
                 "agent.run.complete",
@@ -141,20 +188,20 @@ class BaseAgent(ABC):
                 trace_id=str(request.trace_id),
                 confidence=confidence,
                 risk_level=risk_level,
+                reflector_cloud=self._reflector_is_cloud,
             )
             return response
 
     # ------------------------------------------------------------------
-    # Internal execution — planner → executor → reflect loop
+    # Internal execution — executor → reflect loop
     # ------------------------------------------------------------------
 
     async def _execute(
-        self, request: AgentRequest
-    ) -> tuple[dict[str, Any], float, RiskLevel, str, list[str], list[datetime]]:
+        self, request: AgentRequest, tm: TokenMap
+    ) -> tuple[dict[str, Any], float, RiskLevel, str, list[str], list[datetime], list[str]]:
         system_msg = SystemMessage(content=self._system_prompt(request.user_profile))
         human_msg = HumanMessage(content=request.query)
 
-        # Inject profile context so tools don't need to query it themselves
         profile_context = HumanMessage(
             content=(
                 f"[User profile] owner_id={request.user_profile.owner_id} "
@@ -170,49 +217,102 @@ class BaseAgent(ABC):
         best_reasoning: str = ""
         all_warnings: list[str] = []
         tool_freshness: list[datetime] = []
+        all_tools_used: list[str] = []
 
-        # Build Langfuse callback scoped to this agent run.
-        # All LLM calls and tool calls inside the LangGraph loop are recorded
-        # as children of the orchestrator trace that owns request.trace_id.
-        lf_handler = get_callback_handler(
+        _lf_meta = {"agent_id": self.AGENT_ID, "query_preview": request.query[:80]}
+        _lf_kwargs = dict(
             trace_id=str(request.trace_id),
             user_id=str(request.user_profile.owner_id),
-            metadata={"agent_id": self.AGENT_ID, "query_preview": request.query[:80]},
+            metadata=_lf_meta,
         )
-        lf_callbacks = [lf_handler] if lf_handler is not None else []
+        compactor_handler = get_callback_handler(**_lf_kwargs, node_name="compactor")
+        compactor_callbacks = [compactor_handler] if compactor_handler is not None else []
+
+        # Per-iteration handlers are created inside the loop so each iteration's
+        # iteration number appears in the span metadata.
+        prev_confidence: float | None = None
 
         for iteration in range(_MAX_REFLECT + 1):
-            messages, _ = await compact_messages(messages, self._llm)
+            # Skip compactor LLM call entirely when the message list is short —
+            # avoids a wasted ainvoke and an empty Langfuse span.
+            from services.agent.context import CONTEXT_WINDOW_THRESHOLD  # noqa: PLC0415
+            if len(messages) > CONTEXT_WINDOW_THRESHOLD:
+                messages, _ = await compact_messages(messages, self._compactor_llm, callbacks=compactor_callbacks)
+
+            iter_meta = {**_lf_meta, "iteration": iteration}
+            executor_handler = get_callback_handler(
+                trace_id=str(request.trace_id),
+                user_id=str(request.user_profile.owner_id),
+                metadata=iter_meta,
+                node_name=f"executor#iter{iteration}",
+            )
+            reflector_handler = get_callback_handler(
+                trace_id=str(request.trace_id),
+                user_id=str(request.user_profile.owner_id),
+                metadata=iter_meta,
+                node_name=f"reflector#iter{iteration}",
+            )
+            executor_callbacks = [executor_handler] if executor_handler is not None else []
+            reflector_callbacks = [reflector_handler] if reflector_handler is not None else []
 
             graph_state = await self._graph.ainvoke(
                 {"messages": messages},
-                config={"recursion_limit": _RECURSION_LIMIT, "callbacks": lf_callbacks},
+                config={"recursion_limit": _RECURSION_LIMIT, "callbacks": executor_callbacks},
             )
 
             final_messages = graph_state["messages"]
             last_ai: AIMessage | None = next(
                 (m for m in reversed(final_messages) if isinstance(m, AIMessage)), None
             )
-            raw_answer = last_ai.content if last_ai else ""
+            raw_answer = _THINK_RE.sub("", last_ai.content if last_ai else "").strip()
 
-            # Collect tool freshness timestamps from ToolResults embedded in messages
             tool_freshness.extend(_extract_freshness(final_messages))
+            all_tools_used.extend(_extract_tool_names(final_messages))
 
-            # Reflect — acall takes a state dict, returns a state dict
-            reflection_state = await self._reflector.acall({
-                "messages": final_messages,
-                "reflect_count": iteration,
-            })
+            # Choose reflector and messages — scrub PII if cloud
+            reflector, reflect_messages = self._prepare_reflection(final_messages, tm)
+
+            reflection_state = await reflector.acall(
+                {
+                    "messages": reflect_messages,
+                    "reflect_count": iteration,
+                },
+                callbacks=reflector_callbacks,
+            )
             confidence = reflection_state["confidence_score"]
             notes = reflection_state.get("reflection_notes", "")
+
+            # Cloud reflector saw anonymised messages — its notes may contain tokens.
+            # Detokenise before storing as reasoning or injecting into executor context.
+            if self._reflector_is_cloud and notes:
+                notes = default_anonymiser.detokenise_answer(notes, tm)
 
             if confidence >= best_confidence:
                 best_confidence = confidence
                 best_reasoning = notes
                 best_result = {"answer": raw_answer}
 
+            # Close per-iteration spans with their output so results are visible
+            # in Langfuse without drilling into child generations.
+            end_callback_span(executor_handler, output={"answer": raw_answer[:500]})
+            end_callback_span(reflector_handler, output={"confidence": confidence, "notes": notes[:200]})
+
             if confidence >= _REFLECT_THRESHOLD:
                 break
+
+            # Early-exit when confidence is decreasing — further reflection
+            # is unlikely to help and only burns tokens.
+            if prev_confidence is not None and confidence < prev_confidence:
+                log.info(
+                    "agent.reflect.early_exit",
+                    agent_id=self.AGENT_ID,
+                    iteration=iteration,
+                    prev_confidence=prev_confidence,
+                    confidence=confidence,
+                )
+                break
+
+            prev_confidence = confidence
 
             if iteration < _MAX_REFLECT:
                 log.info(
@@ -231,11 +331,65 @@ class BaseAgent(ABC):
                     )
                 ]
 
+        end_callback_span(compactor_handler)
+
+        # Attach confidence as a scored metric on the Langfuse trace so runs can
+        # be filtered/sliced by agent confidence in the dashboard.
+        score_trace(str(request.trace_id), name=f"{self.AGENT_ID}.confidence", value=best_confidence)
+
         risk_level = _risk_from_confidence(best_confidence)
-        # Flush Langfuse so LLM/tool spans from this agent run reach the
-        # dashboard before the batch timer fires.
-        lf_flush()
-        return best_result, best_confidence, risk_level, best_reasoning, all_warnings, tool_freshness
+        # Flush is intentionally omitted here — the orchestrator calls flush()
+        # once after all agents complete, avoiding a blocking sync call per agent.
+        tools_used = list(dict.fromkeys(all_tools_used))  # deduplicate, preserve order
+        return best_result, best_confidence, risk_level, best_reasoning, all_warnings, tool_freshness, tools_used
+
+    def _prepare_reflection(
+        self, messages: list, tm: TokenMap
+    ) -> tuple[ReflectionNode, list]:
+        """
+        Return (reflector, messages_to_use).
+
+        If reflector is cloud:
+          1. Scrub messages with anonymiser.
+          2. Run PII pre-flight scan on scrubbed text.
+          3. If scan passes → use cloud reflector + scrubbed messages.
+          4. If scan raises → fall back to local reflector + original messages.
+        """
+        if not self._reflector_is_cloud:
+            return self._reflector, messages
+
+        scrubbed = default_anonymiser.scrub_messages(messages, tm)
+
+        # Scan only what actually reaches the cloud LLM.
+        # ReflectionNode._evaluate sends: question (first non-profile HumanMessage)
+        # + draft_answer (last AIMessage string content). Everything else (tool
+        # results, intermediate AI tool-call messages) never leaves the container.
+        from langchain_core.messages import AIMessage as _AIMessage, HumanMessage as _HMSG
+        _cloud_question = ""
+        _cloud_draft = ""
+        for m in scrubbed:
+            if isinstance(m, _HMSG) and not _cloud_question:
+                q = m.content if isinstance(m.content, str) else ""
+                if q.startswith("[User profile]") or q.startswith("[owner_id="):
+                    continue
+                _cloud_question = q
+            if isinstance(m, _AIMessage) and isinstance(m.content, str) and m.content:
+                _cloud_draft = m.content  # last AI string content = draft answer
+
+        scan_text = f"{_cloud_question} {_cloud_draft}"
+        try:
+            default_scanner.assert_safe_for_cloud(
+                scan_text, context=f"{self.AGENT_ID}.reflector"
+            )
+            log.debug("agent.reflector.cloud", agent_id=self.AGENT_ID)
+            return self._reflector, scrubbed
+        except ValueError as exc:
+            log.warning(
+                "agent.reflector.pii_fallback",
+                agent_id=self.AGENT_ID,
+                error=str(exc),
+            )
+            return self._local_reflector, messages
 
     # ------------------------------------------------------------------
     # Graph construction (inner assistant↔tools loop)
@@ -243,7 +397,7 @@ class BaseAgent(ABC):
 
     def _build_graph(self):
         tools = self._build_tools()
-        llm_with_tools = self._llm.bind_tools(tools)
+        llm_with_tools = self._executor_llm.bind_tools(tools)
         tool_node = ToolNode(tools)
 
         def assistant(state: MessagesState) -> dict:
@@ -268,6 +422,18 @@ class BaseAgent(ABC):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _extract_tool_names(messages: list) -> list[str]:
+    """Collect tool names from AIMessage tool_calls in the message list."""
+    names: list[str] = []
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                if name:
+                    names.append(name)
+    return names
 
 
 def _extract_freshness(messages: list) -> list[datetime]:
@@ -298,7 +464,7 @@ def _compute_freshness_hours(timestamps: list[datetime]) -> float:
 
 def _tier_from_freshness(hours: float) -> DataTier:
     from libs.schemas.agent_envelope import DataTier
-    if hours < (1 / 60):   # < 1 minute
+    if hours < (1 / 60):
         return DataTier.REALTIME
     if hours < 1.0:
         return DataTier.CACHED

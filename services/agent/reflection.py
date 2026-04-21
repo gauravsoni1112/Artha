@@ -117,7 +117,7 @@ class ReflectionNode:
     def __init__(self, llm: Any) -> None:
         self._llm = llm
 
-    async def acall(self, state: dict) -> dict:
+    async def acall(self, state: dict, **kwargs) -> dict:
         messages = state.get("messages", [])
         reflect_count: int = state.get("reflect_count", 0)
 

@@ -9,24 +9,28 @@ LLM calls and tool calls appear as nested spans under the orchestrator trace —
 without depending on the broken langfuse.callback path (which requires the
 old langchain v0 import style).
 
+Key behaviours:
+- Spans are created lazily on the first LLM/tool start, so roles that are
+  skipped (e.g. compactor when no compaction runs) leave no empty spans.
+- Token usage falls back to response.generations[*].message.usage_metadata
+  (LangChain v0.2+) when llm_output.token_usage is absent (e.g. Ollama).
+- Message content is truncated at _PAYLOAD_MAX_CHARS to avoid Langfuse
+  bandwidth / storage bloat from large tool results.
+- score_trace() attaches a named numeric score to any trace (e.g. confidence).
+- end_callback_span() closes a handler's role-level span with final output.
+
 Usage:
-    from libs.telemetry.langfuse_handler import get_callback_handler, create_trace
+    lf_trace = create_trace(trace_id=str(trace_id), name="...", user_id=..., input=...)
 
-    lf_trace = create_trace(
-        trace_id=str(trace_id),
-        name="orchestrator.recommendation",
-        user_id=str(owner_id),
-        input={"query": query},
-    )
+    handler = get_callback_handler(trace_id=str(trace_id), node_name="executor", ...)
+    await graph.ainvoke({"messages": messages}, config={"callbacks": [handler]})
 
-    handler = get_callback_handler(trace_id=str(trace_id), ...)
-    await graph.ainvoke(
-        {"messages": messages},
-        config={"callbacks": [h for h in [handler] if h is not None]},
-    )
+    end_callback_span(handler, output={"answer": "...", "confidence": 0.82})
+    score_trace(str(trace_id), name="confidence", value=0.82)
 
     if lf_trace is not None:
-        lf_trace.update(output={"confidence": ..., "gaps": ...})
+        lf_trace.update(output={...})
+    flush()
 """
 
 from __future__ import annotations
@@ -41,6 +45,9 @@ log = structlog.get_logger(__name__)
 
 _client: Any = None
 _client_ready: bool = False
+
+# Truncate serialised string fields to this length to keep payloads small.
+_PAYLOAD_MAX_CHARS: int = int(os.getenv("LANGFUSE_PAYLOAD_MAX_CHARS", "4096"))
 
 
 def _get_client() -> Any | None:
@@ -72,10 +79,17 @@ def _get_client() -> Any | None:
 
 
 def _serialize(obj: Any) -> Any:
-    """Best-effort conversion of LangChain objects to JSON-safe structures."""
+    """Best-effort conversion of LangChain objects to JSON-safe structures.
+
+    String fields are truncated at _PAYLOAD_MAX_CHARS to prevent oversized payloads.
+    """
     if obj is None:
         return None
-    if isinstance(obj, (str, int, float, bool)):
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, str):
+        return obj[:_PAYLOAD_MAX_CHARS] if len(obj) > _PAYLOAD_MAX_CHARS else obj
+    if isinstance(obj, (int, float)):
         return obj
     if isinstance(obj, dict):
         return {k: _serialize(v) for k, v in obj.items()}
@@ -89,19 +103,18 @@ def _serialize(obj: Any) -> Any:
             return _serialize(obj.dict())
         except Exception:
             pass
-    return str(obj)
+    return str(obj)[:_PAYLOAD_MAX_CHARS]
 
 
 class _LangfuseCallbackHandler:
     """
     LangGraph/LangChain callback handler backed by Langfuse v2 REST API.
 
-    Inherits from langchain_core.callbacks.BaseCallbackHandler so it is
-    accepted by graph.ainvoke(config={"callbacks": [...]}).  Does NOT use
-    langfuse.callback (which requires old langchain v0 imports).
+    The role-level span is created lazily on the first LLM or tool start call,
+    so skipped roles (e.g. compactor when the message list is short) leave no
+    empty spans in the Langfuse UI.
     """
 
-    # Import base class lazily so the module loads even without langchain_core.
     _base_cls: type | None = None
 
     @classmethod
@@ -111,11 +124,13 @@ class _LangfuseCallbackHandler:
             cls._base_cls = BaseCallbackHandler
         return cls._base_cls
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-
-    def __init__(self, agent_span: Any, agent_id: str) -> None:
-        # Dynamically make this a proper subclass of BaseCallbackHandler.
+    def __init__(
+        self,
+        trace: Any,
+        span_name: str,
+        agent_id: str,
+        span_metadata: dict[str, Any] | None = None,
+    ) -> None:
         base = self._get_base()
         if not isinstance(self, base):
             self.__class__ = type(
@@ -125,12 +140,36 @@ class _LangfuseCallbackHandler:
             )
             base.__init__(self)  # type: ignore[arg-type]
 
-        self._span = agent_span
+        self._trace = trace
+        self._span_name = span_name
         self._agent_id = agent_id
+        self._span_metadata = span_metadata or {}
+        # Lazily created on first LLM/tool event
+        self._span: Any = None
         # run_id → StatefulGenerationClient
         self._generations: dict[str, Any] = {}
         # run_id → StatefulSpanClient  (tool spans)
         self._tool_spans: dict[str, Any] = {}
+
+    def _ensure_span(self) -> Any:
+        """Create the role-level span on first use."""
+        if self._span is None:
+            try:
+                self._span = self._trace.span(
+                    name=self._span_name,
+                    metadata=self._span_metadata,
+                )
+            except Exception as exc:
+                log.warning("langfuse.span_create_error", error=str(exc))
+        return self._span
+
+    def end_span(self, output: Any = None) -> None:
+        """Close the role-level span with optional output. No-op if span was never opened."""
+        if self._span is not None:
+            try:
+                self._span.end(output=_serialize(output))
+            except Exception as exc:
+                log.warning("langfuse.span_end_error", error=str(exc))
 
     # ── LLM / chat-model callbacks ────────────────────────────────────────────
 
@@ -142,13 +181,16 @@ class _LangfuseCallbackHandler:
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        span = self._ensure_span()
+        if span is None:
+            return
         try:
             model_name = (
                 serialized.get("kwargs", {}).get("model_name")
                 or serialized.get("kwargs", {}).get("model")
                 or (serialized.get("id") or ["unknown"])[-1]
             )
-            gen = self._span.generation(
+            gen = span.generation(
                 id=str(run_id),
                 name=model_name,
                 model=model_name,
@@ -166,13 +208,16 @@ class _LangfuseCallbackHandler:
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        span = self._ensure_span()
+        if span is None:
+            return
         try:
             model_name = (serialized.get("id") or ["unknown"])[-1]
-            gen = self._span.generation(
+            gen = span.generation(
                 id=str(run_id),
                 name=model_name,
                 model=model_name,
-                input=prompts,
+                input=_serialize(prompts),
             )
             self._generations[str(run_id)] = gen
         except Exception as exc:
@@ -185,15 +230,28 @@ class _LangfuseCallbackHandler:
                 return
             llm_out = response.llm_output or {}
             usage_raw = llm_out.get("token_usage") or llm_out.get("usage", {})
-            from langfuse.model import ModelUsage  # noqa: PLC0415
 
-            usage = ModelUsage(
-                input=usage_raw.get("prompt_tokens"),
-                output=usage_raw.get("completion_tokens"),
-                total=usage_raw.get("total_tokens"),
-            ) if usage_raw else None
+            # Fallback: LangChain v0.2+ puts usage in generations[0][0].message.usage_metadata
+            if not usage_raw and response.generations:
+                first_row = response.generations[0]
+                if first_row:
+                    g0 = first_row[0]
+                    msg = getattr(g0, "message", None)
+                    if msg is not None:
+                        usage_raw = getattr(msg, "usage_metadata", {}) or {}
 
-            # Extract text from first generation
+            usage = None
+            if usage_raw:
+                try:
+                    from langfuse.model import ModelUsage  # noqa: PLC0415
+                    usage = ModelUsage(
+                        input=usage_raw.get("prompt_tokens") or usage_raw.get("input_tokens"),
+                        output=usage_raw.get("completion_tokens") or usage_raw.get("output_tokens"),
+                        total=usage_raw.get("total_tokens"),
+                    )
+                except Exception:
+                    pass
+
             output_text: Any = None
             if response.generations:
                 first = response.generations[0]
@@ -223,30 +281,33 @@ class _LangfuseCallbackHandler:
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        span = self._ensure_span()
+        if span is None:
+            return
         try:
             name = serialized.get("name") or (serialized.get("id") or ["tool"])[-1]
-            span = self._span.span(
+            tool_span = span.span(
                 id=str(run_id),
                 name=name,
-                input={"input": input_str},
+                input={"input": input_str[:_PAYLOAD_MAX_CHARS]},
             )
-            self._tool_spans[str(run_id)] = span
+            self._tool_spans[str(run_id)] = tool_span
         except Exception as exc:
             log.warning("langfuse.on_tool_start_error", error=str(exc))
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         try:
-            span = self._tool_spans.pop(str(run_id), None)
-            if span:
-                span.end(output=_serialize(output))
+            tool_span = self._tool_spans.pop(str(run_id), None)
+            if tool_span:
+                tool_span.end(output=_serialize(output))
         except Exception as exc:
             log.warning("langfuse.on_tool_end_error", error=str(exc))
 
     def on_tool_error(self, error: Any, *, run_id: UUID, **kwargs: Any) -> None:
         try:
-            span = self._tool_spans.pop(str(run_id), None)
-            if span:
-                span.end(level="ERROR", status_message=str(error))
+            tool_span = self._tool_spans.pop(str(run_id), None)
+            if tool_span:
+                tool_span.end(level="ERROR", status_message=str(error))
         except Exception as exc:
             log.warning("langfuse.on_tool_error_error", error=str(exc))
 
@@ -256,12 +317,16 @@ def get_callback_handler(
     user_id: str | None = None,
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    node_name: str | None = None,
 ) -> Any | None:
     """
     Return a LangGraph CallbackHandler linked to *trace_id*.
 
-    Every LLM call and tool call inside the invocation is recorded as a child
-    span of the orchestrator trace.  Returns None if Langfuse is not configured.
+    The role-level span is created lazily on the first LLM/tool event, so
+    roles that are bypassed (e.g. compactor when no compaction fires) leave
+    no empty spans in the Langfuse UI.
+
+    Returns None if Langfuse is not configured.
     """
     client = _get_client()
     if client is None:
@@ -269,17 +334,46 @@ def get_callback_handler(
 
     try:
         agent_id = (metadata or {}).get("agent_id", "agent")
-        # Re-open the existing trace (no network call; just a client-side handle).
+        span_name = f"{agent_id}/{node_name}" if node_name else agent_id
+        span_metadata = {**(metadata or {}), "node": node_name or "unknown"}
         trace = client.trace(id=trace_id)
-        # Create an agent-level span so LLM/tool spans nest under it.
-        agent_span = trace.span(
-            name=agent_id,
-            metadata=metadata or {},
+        return _LangfuseCallbackHandler(
+            trace=trace,
+            span_name=span_name,
+            agent_id=span_name,
+            span_metadata=span_metadata,
         )
-        return _LangfuseCallbackHandler(agent_span=agent_span, agent_id=agent_id)
     except Exception as exc:
         log.warning("langfuse.callback_handler_error", error=str(exc))
         return None
+
+
+def end_callback_span(handler: Any | None, output: Any = None) -> None:
+    """Close a handler's role-level span with optional output. Safe to call on None."""
+    if handler is not None and hasattr(handler, "end_span"):
+        handler.end_span(output=output)
+
+
+def score_trace(trace_id: str, name: str, value: float, comment: str | None = None) -> None:
+    """
+    Attach a named numeric score to an existing Langfuse trace.
+
+    Useful for surfacing agent-level confidence, critic penalty, etc. so you
+    can filter/slice runs in the Langfuse dashboard without drilling into spans.
+    No-op if Langfuse is not configured.
+    """
+    client = _get_client()
+    if client is None:
+        return
+    try:
+        client.score(
+            trace_id=trace_id,
+            name=name,
+            value=value,
+            comment=comment,
+        )
+    except Exception as exc:
+        log.warning("langfuse.score_trace_error", trace_id=trace_id, name=name, error=str(exc))
 
 
 def create_trace(
@@ -318,8 +412,8 @@ def flush() -> None:
     """
     Flush all pending Langfuse events synchronously.
 
-    Call at the end of each request and during shutdown so spans appear in the
-    dashboard immediately rather than waiting for the background batch timer.
+    Call once per request at the orchestrator level — not per-agent — so that
+    parallel agent calls don't each block on a sync flush to Langfuse.
     """
     client = _get_client()
     if client is None:

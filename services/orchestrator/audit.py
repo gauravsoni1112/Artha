@@ -133,23 +133,25 @@ async def create_recommendation(
     plan: Plan,
     dispatched_results: list[DispatchedResult],
     critic_result: CriticResult,
+    synthesized_answer: str = "",
 ) -> Recommendation:
     """
     Write the immutable recommendation header and the initial GENERATED event.
 
-    final_output_json stores the Critic's full evaluation for display.
+    final_output_json stores the Critic's full evaluation + synthesized_answer.
     agent_outputs_json stores full agent I/O verbatim for replay.
     composite_confidence is the Critic's final adjusted score.
 
     Returns the Recommendation ORM object (id is populated after flush).
     """
+    final_output = {**_serialise_critic(critic_result), "synthesized_answer": synthesized_answer}
     rec = Recommendation(
         owner_id=owner_id,
         snapshot_id=snapshot_id,
         query=query,
         plan_json=plan.to_dict(),
         agent_outputs_json=_serialise_results(dispatched_results),
-        final_output_json=_serialise_critic(critic_result),
+        final_output_json=final_output,
         composite_confidence=critic_result.final_confidence,
         current_state=RecommendationState.GENERATED.value,
     )
