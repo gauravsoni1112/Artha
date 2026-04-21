@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.agent.tools.base import ToolResult
+from services.agent.tools.fetch_accounts import run as fetch_accounts_run
 from services.agent.tools.transaction_query import run as transaction_query_run
 from services.agent.tools.category_analysis import run as category_analysis_run
 from services.agent.tools.net_worth import run as net_worth_run
@@ -41,6 +42,11 @@ from services.agent.tools.calculate import (
 
 
 # ── Input schemas (used by LangGraph for JSON schema extraction) ───────────────
+
+class FetchAccountsInput(BaseModel):
+    owner_id: str = Field(description="UUID of the owner")
+    account_type: str | None = Field(None, description="Filter by account type e.g. BANK, CREDIT_CARD, INVESTMENT")
+
 
 class TransactionQueryInput(BaseModel):
     owner_id: str = Field(description="UUID of the owner")
@@ -150,6 +156,7 @@ class CalculateCompoundInterestInput(BaseModel):
 ToolFn = Callable[..., Coroutine[Any, Any, ToolResult]]
 
 TOOL_REGISTRY: dict[str, tuple[ToolFn, type[BaseModel]]] = {
+    "fetch_accounts": (fetch_accounts_run, FetchAccountsInput),
     "transaction_query": (transaction_query_run, TransactionQueryInput),
     "category_analysis": (category_analysis_run, CategoryAnalysisInput),
     "net_worth": (net_worth_run, NetWorthInput),
