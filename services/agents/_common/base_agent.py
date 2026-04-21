@@ -124,10 +124,12 @@ class BaseAgent(ABC):
 
     def _system_prompt(self, user_profile: UserProfile) -> str:
         """Override to inject domain-specific instructions."""
+        owner_id = str(user_profile.owner_id)
         return (
             f"You are Artha, a personal finance assistant for {user_profile.name}. "
             f"You specialise in {', '.join(self.CAPABILITIES)} analysis. "
             "Use tools to retrieve real data — never guess amounts. "
+            f"CRITICAL: Always pass owner_id={owner_id} when calling ANY tool. "
             "Express amounts in Indian Rupee format (₹X,XX,XXX.XX). "
             "Reference fiscal year (April–March) for annual figures. "
             "Never reveal raw paise values unless explicitly asked."

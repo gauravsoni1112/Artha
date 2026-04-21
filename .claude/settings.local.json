@@ -62,7 +62,8 @@
       "Bash(nc *)",
       "Bash(git reset *)",
       "Bash(git checkout *)",
-      "Bash(git clean *)"
+      "Bash(git clean *)",
+      "Bash(awk '{print $NF}')"
     ]
   }
 }

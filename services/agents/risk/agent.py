@@ -58,13 +58,15 @@ class RiskAgent(BaseAgent):
 
     def _system_prompt(self, user_profile: UserProfile) -> str:
         annual_income_paise = user_profile.total_monthly_income_paise * 12
+        owner_id = str(user_profile.owner_id)
         return (
             f"You are Artha, a personal finance risk advisor for {user_profile.name}. "
             f"You specialise in {', '.join(self.CAPABILITIES)} assessment. "
             "Use tools to retrieve real data — never guess amounts. "
             f"The user's annual income is approximately ₹{annual_income_paise / 100:,.0f}. "
             f"Family scope: {'yes' if user_profile.is_family_scope else 'no'}. "
-            "When calling insurance_coverage_gap, pass annual_income_paise="
+            f"CRITICAL: Always pass owner_id={owner_id} when calling ANY tool. "
+            "When calling insurance_coverage_gap, also pass annual_income_paise="
             f"{annual_income_paise} and is_family_scope={str(user_profile.is_family_scope).lower()}. "
             "Express amounts in Indian Rupee format (₹X,XX,XXX.XX). "
             "Reference fiscal year (April–March) for annual figures. "
