@@ -214,3 +214,52 @@ async def test_chat_message_in_response_matches_request(async_client, mock_agent
 
     assert resp.status_code == 200
     assert resp.json()["message"] == test_message
+
+
+@pytest.mark.asyncio
+async def test_chat_account_query_uses_fetch_accounts_tool(async_client):
+    """Account-related queries trigger fetch_accounts tool."""
+    result_with_fetch_accounts = {
+        "response": "You have 3 accounts: HDFC Bank Savings, ICICI Credit Card, Zerodha Investment.",
+        "tool_calls": ["fetch_accounts"],
+        "messages": [],
+        "session_id": str(uuid.uuid4()),
+        "run_id": str(uuid.uuid4()),
+    }
+
+    with patch("api.routers.agent.ArthaAgent") as MockAgent:
+        MockAgent.return_value.chat = AsyncMock(return_value=result_with_fetch_accounts)
+
+        resp = await async_client.post(
+            "/agent/chat",
+            json={"owner_id": OWNER_ID, "message": "List all my bank accounts"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "fetch_accounts" in data["tool_calls"]
+
+
+@pytest.mark.asyncio
+async def test_chat_transaction_search_with_account_uses_both_tools(async_client):
+    """Transaction search in specific account uses fetch_accounts then transaction_query."""
+    result_with_both_tools = {
+        "response": "Found 5 transactions in your HDFC account totaling ₹15,000.",
+        "tool_calls": ["fetch_accounts", "transaction_query"],
+        "messages": [],
+        "session_id": str(uuid.uuid4()),
+        "run_id": str(uuid.uuid4()),
+    }
+
+    with patch("api.routers.agent.ArthaAgent") as MockAgent:
+        MockAgent.return_value.chat = AsyncMock(return_value=result_with_both_tools)
+
+        resp = await async_client.post(
+            "/agent/chat",
+            json={"owner_id": OWNER_ID, "message": "Search for transactions in my credit card"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "fetch_accounts" in data["tool_calls"]
+    assert "transaction_query" in data["tool_calls"]

@@ -25,9 +25,16 @@ async def run(
     account_type: str | None = None,
 ) -> ToolResult:
     """
-    Fetch all accounts for an owner with transaction summaries.
+    List all bank accounts, credit card accounts, and investment accounts with details.
 
-    Optionally filter by account type (e.g., BANK, CREDIT_CARD, INVESTMENT).
+    Call this tool when the user asks to:
+    - See all their accounts
+    - List bank accounts, credit cards, or investment accounts
+    - Get account details, account numbers, or institution information
+    - Identify which account to query for transactions
+
+    Returns: Account ID, type, institution, nickname, active status, and transaction count.
+    Optionally filter by account_type: BANK, CREDIT_CARD, INVESTMENT, etc.
     """
     log.info("tool.fetch_accounts.start", owner_id=owner_id, account_type=account_type)
 
