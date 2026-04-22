@@ -77,7 +77,8 @@
       "Bash(gunzip -f /tmp/design.gz)",
       "Read(//tmp/**)",
       "Bash(mkdir -p /tmp/design_files)",
-      "Bash(tar -xf /tmp/design -C /tmp/design_files)"
+      "Bash(tar -xf /tmp/design -C /tmp/design_files)",
+      "Bash(brew install *)"
     ]
   }
 }
