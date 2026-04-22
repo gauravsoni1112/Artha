@@ -27,13 +27,13 @@ class GoalAgent(BaseAgent):
     AGENT_ID = "goal_agent"
     CAPABILITIES = ["goal", "planning", "savings"]
 
-    def _build_tools(self) -> list[StructuredTool]:
+    def _build_tools(self, owner_id: str) -> list[StructuredTool]:
         return [
             StructuredTool(
                 name=name,
                 description=fn.__doc__ or name,
                 args_schema=schema,
-                coroutine=self._make_tool_bound(fn),
+                coroutine=self._make_tool_bound(fn, owner_id),
             )
             for name, fn, schema in _GOAL_TOOLS
         ]

@@ -51,7 +51,8 @@ _INTENT_RULES: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"cashflow|spending|budget|expense|income|salary|payment|transaction|"
-            r"spend|monthly|outflow|inflow|surplus|deficit|afford|can\s*i|should\s*i"
+            r"spend|monthly|outflow|inflow|surplus|deficit|afford|can\s*i|should\s*i|"
+            r"\bbank\b|\baccount\b|\baccounts\b|\bbalance\b|\bstatement\b"
         ),
         "cashflow_agent",
     ),

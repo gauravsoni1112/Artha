@@ -101,6 +101,9 @@ class AgentResponse(BaseModel):
     reasoning: str = Field(..., description="Chain-of-thought / explanation")
     warnings: list[str] = Field(default_factory=list)
 
+    # Tool provenance — names of tools actually called during execution
+    tools_used: list[str] = Field(default_factory=list)
+
     # Fallback
     fallback_used: bool = False
     fallback_reason: str | None = None

@@ -20,7 +20,6 @@ step the planner just passes it through, so simple queries remain fast.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import structlog
@@ -28,6 +27,39 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 log = structlog.get_logger(__name__)
+
+
+def _extract_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object from *text*, or None.
+
+    Counts braces correctly so greedy regex cannot match across unrelated
+    braces in surrounding prose or markdown fences.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 # ── Plan schema ───────────────────────────────────────────────────────────────
 
@@ -65,7 +97,6 @@ Rules:
 - If the question compares two periods, uses the word "vs", "compare", "trend",
   "versus", or asks about multiple categories, produce 2–4 steps.
 - Each step must be a self-contained question answerable by a financial tool.
-- Always include the owner_id token in each step so tools can resolve it.
 - Maximum 4 steps.
 """
 
@@ -80,9 +111,6 @@ class PlannerNode:
         planner = PlannerNode(llm=chat_model)
         graph.add_node("planner", planner)
     """
-
-    # Regex to extract JSON even if the LLM wraps it in markdown fences
-    _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
     def __init__(self, llm: Any) -> None:
         self._llm = llm
@@ -131,13 +159,14 @@ class PlannerNode:
 
     def _parse_response(self, content: str, original_question: str) -> Plan:
         """Parse JSON from LLM output, falling back to a trivial plan on error."""
-        match = self._JSON_RE.search(content)
-        if not match:
-            log.warning("planner.parse_failed", raw=content[:200])
-            return Plan.trivial(original_question)
-        try:
-            data = json.loads(match.group())
-            return Plan(**data)
-        except Exception as exc:
-            log.warning("planner.invalid_json", error=str(exc), raw=content[:200])
-            return Plan.trivial(original_question)
+        # Try clean JSON first, then balanced-brace extraction
+        for candidate in (content.strip(), _extract_json_object(content)):
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+                return Plan(**data)
+            except Exception:
+                continue
+        log.warning("planner.parse_failed", raw=content[:200])
+        return Plan.trivial(original_question)

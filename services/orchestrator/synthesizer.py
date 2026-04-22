@@ -50,6 +50,21 @@ Rules:
 """
 
 
+def _agent_contributed(r: DispatchedResult) -> bool:
+    """True if the agent actually called tools and produced a usable answer.
+
+    An agent that returned an answer string but called zero tools almost
+    certainly hallucinated — it had no domain tool to answer the query.
+    Treat it the same as a FAILURE so the synthesizer omits it rather than
+    presenting fabricated data to the user.
+    """
+    if r.fallback_tier == FallbackTier.FAILURE or r.response is None:
+        return False
+    if not r.response.tools_used:
+        return False
+    return bool(r.response.result.get("answer", "").strip())
+
+
 def _build_user_prompt(
     query: str,
     dispatched_results: list[DispatchedResult],
@@ -57,10 +72,11 @@ def _build_user_prompt(
 ) -> str:
     lines = [f"User question: {query}\n\nAgent findings:"]
     for r in dispatched_results:
-        if r.fallback_tier == FallbackTier.FAILURE or r.response is None:
-            lines.append(f"\n[{r.agent_id}]: unavailable — {r.error or 'no data'}")
+        if not _agent_contributed(r):
+            reason = r.error or ("no tools called" if r.response is not None else "no data")
+            lines.append(f"\n[{r.agent_id}]: unavailable — {reason}")
             continue
-        answer = r.response.result.get("answer", "").strip()
+        answer = r.response.result.get("answer", "").strip()  # type: ignore[union-attr]
         if answer:
             lines.append(f"\n[{r.agent_id}]:\n{answer}")
 
@@ -98,8 +114,8 @@ def _scrub_messages_for_cloud(
 def _fallback_concat(dispatched_results: list[DispatchedResult]) -> str:
     parts = []
     for r in dispatched_results:
-        if r.response and r.fallback_tier != FallbackTier.FAILURE:
-            answer = r.response.result.get("answer", "").strip()
+        if _agent_contributed(r):
+            answer = r.response.result.get("answer", "").strip()  # type: ignore[union-attr]
             if answer:
                 parts.append(answer)
     return "\n\n".join(parts) if parts else "No agent data available."
@@ -115,18 +131,8 @@ async def synthesize(
     Merge all agent answers into one narrative. Falls back to concatenation
     on any LLM error so the orchestrator pipeline never breaks.
     """
-    # Skip the LLM call entirely when no agent produced useful output —
-    # avoids burning cloud tokens for a "no data available" response.
-    # Strips qwen3-style <think>...</think> blocks before checking visibility.
-    def _has_visible_content(answer: str) -> bool:
-        return bool(_THINK_RE.sub("", answer).strip())
-
-    has_content = any(
-        r.fallback_tier != FallbackTier.FAILURE
-        and r.response is not None
-        and _has_visible_content(r.response.result.get("answer", ""))
-        for r in dispatched_results
-    )
+    # Skip the LLM call entirely when no agent produced useful tool-backed output.
+    has_content = any(_agent_contributed(r) for r in dispatched_results)
     if not has_content:
         log.info("synthesizer.skipped_no_agent_data", trace_id=trace_id)
         return _fallback_concat(dispatched_results)

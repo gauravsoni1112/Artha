@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.database import get_session
+from api.database import AsyncSessionLocal, get_session
 from api.rate_limit import limiter
 from libs.schemas.user_profile import UserProfile
 from services.agent.agent import ArthaAgent
@@ -126,7 +126,7 @@ async def chat(
 async def _handle_phase3_agent(body: ChatRequest, session: AsyncSession) -> ChatResponse:
     try:
         config = LLMConfig.from_env()
-        agent = ArthaAgent(session=session, config=config)
+        agent = ArthaAgent(session_factory=AsyncSessionLocal, config=config)
         result = await agent.chat(
             owner_id=str(body.owner_id),
             message=body.message,

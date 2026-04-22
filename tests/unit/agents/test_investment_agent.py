@@ -40,11 +40,11 @@ def _make_agent() -> InvestmentAgent:
 
 
 def test_build_tools_names():
-    assert {t.name for t in _make_agent()._build_tools()} == _EXPECTED_TOOLS
+    assert {t.name for t in _make_agent()._build_tools("00000000-0000-0000-0000-000000000001")} == _EXPECTED_TOOLS
 
 
 def test_build_tools_are_async():
-    for t in _make_agent()._build_tools():
+    for t in _make_agent()._build_tools("00000000-0000-0000-0000-000000000001"):
         assert t.coroutine is not None
 
 

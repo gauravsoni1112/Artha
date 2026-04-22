@@ -14,7 +14,7 @@ from typing import Any, Callable, Coroutine
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from services.agent.tools.base import ToolResult
 from services.agent.tools.fetch_accounts import run as fetch_accounts_run
@@ -44,12 +44,10 @@ from services.agent.tools.calculate import (
 # ── Input schemas (used by LangGraph for JSON schema extraction) ───────────────
 
 class FetchAccountsInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     account_type: str | None = Field(None, description="Filter by account type e.g. BANK, CREDIT_CARD, INVESTMENT")
 
 
 class TransactionQueryInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     start_date: str | None = Field(None, description="Start date YYYY-MM-DD (inclusive)")
     end_date: str | None = Field(None, description="End date YYYY-MM-DD (inclusive)")
     category: str | None = Field(None, description="Transaction category filter e.g. GROCERIES")
@@ -58,68 +56,57 @@ class TransactionQueryInput(BaseModel):
 
 
 class CategoryAnalysisInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     start_date: str | None = Field(None, description="Start date YYYY-MM-DD")
     end_date: str | None = Field(None, description="End date YYYY-MM-DD")
     fiscal_year: str | None = Field(None, description="Fiscal year e.g. 2024-25")
 
 
 class NetWorthInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
+    pass
 
 
 class PortfolioValueInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     asset_class: str | None = Field(None, description="Filter by asset class e.g. MUTUAL_FUND, EQUITY")
 
 
 class TaxSummaryInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     fiscal_year: str | None = Field(None, description="Fiscal year e.g. 2024-25; omit for all years")
 
 
 class UpcomingExpensesInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     lookahead_days: int = Field(30, description="Days ahead to predict recurring expenses")
 
 
 class SpendingTrendInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     category: str | None = Field(None, description="Category to trend e.g. GROCERIES; omit for all")
     months: int = Field(6, description="Number of months to include (default 6)")
 
 
 class BudgetComparisonInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     start_date: str | None = Field(None, description="Start date YYYY-MM-DD")
     end_date: str | None = Field(None, description="End date YYYY-MM-DD")
     fiscal_year: str | None = Field(None, description="Fiscal year e.g. 2024-25")
 
 
 class GoalProgressInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     goal_name: str | None = Field(None, description="Partial goal name filter; omit for all goals")
 
 
 class EmergencyFundMonthsInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     expense_months: int = Field(3, description="Number of recent months used to compute avg expense (default 3)")
 
 
 class AssetConcentrationInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     concentration_threshold_pct: float = Field(
         40.0, description="Flag asset classes above this % of total portfolio (default 40)"
     )
 
 
 class DebtToIncomeInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     months: int = Field(3, description="Number of recent months to average over (default 3)")
 
 
 class InsuranceCoverageGapInput(BaseModel):
-    owner_id: str = Field(description="UUID of the owner")
     annual_income_paise: int = Field(0, description="User's annual gross income in paise (from profile)")
     is_family_scope: bool = Field(False, description="True if coverage should include dependants")
     existing_life_cover_paise: int = Field(0, description="Current life insurance sum assured in paise")
@@ -180,16 +167,21 @@ TOOL_REGISTRY: dict[str, tuple[ToolFn, type[BaseModel]]] = {
 }
 
 
-def build_langchain_tools(session: AsyncSession) -> list[StructuredTool]:
+def build_langchain_tools(session_factory: async_sessionmaker, owner_id: str) -> list[StructuredTool]:
     """
-    Bind the DB session into each tool and return LangChain StructuredTool objects
-    suitable for passing to a LangGraph ToolNode.
+    Bind the DB session factory and authenticated owner_id into each tool.
+
+    - Each invocation opens its own AsyncSession (no shared-session corruption).
+    - owner_id is bound server-side: any value the LLM passes is discarded and
+      replaced with the authenticated owner's UUID, preventing prompt-injection
+      from causing cross-tenant data access.
     """
     tools = []
     for name, (fn, schema) in TOOL_REGISTRY.items():
-        # Bind session via closure
-        async def _bound(session=session, fn=fn, **kwargs):
-            return (await fn(session=session, **kwargs)).to_llm_str()
+        async def _bound(session_factory=session_factory, fn=fn, bound_owner_id=owner_id, **kwargs):
+            kwargs.pop("owner_id", None)  # discard any LLM-supplied value
+            async with session_factory() as session:
+                return (await fn(session=session, owner_id=bound_owner_id, **kwargs)).to_llm_str()
 
         tools.append(
             StructuredTool(

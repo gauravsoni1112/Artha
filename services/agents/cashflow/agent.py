@@ -2,6 +2,7 @@
 CashflowAgent — cashflow, spending, and budgeting domain.
 
 Tools exposed:
+  - fetch_accounts       : list all accounts (bank, credit card, investment) with balances
   - transaction_query    : fetch raw transactions by date / category / account
   - category_analysis    : spending breakdown by category (totals + %)
   - spending_trend       : month-over-month trend per category or overall
@@ -20,12 +21,14 @@ from langchain_core.tools import StructuredTool
 from services.agent.tools.registry import (
     BudgetComparisonInput,
     CategoryAnalysisInput,
+    FetchAccountsInput,
     SpendingTrendInput,
     TransactionQueryInput,
     UpcomingExpensesInput,
 )
 from services.agent.tools.budget_comparison import run as budget_comparison_run
 from services.agent.tools.category_analysis import run as category_analysis_run
+from services.agent.tools.fetch_accounts import run as fetch_accounts_run
 from services.agent.tools.spending_trend import run as spending_trend_run
 from services.agent.tools.transaction_query import run as transaction_query_run
 from services.agent.tools.upcoming_expenses import run as upcoming_expenses_run
@@ -33,6 +36,7 @@ from services.agents._common.base_agent import BaseAgent
 
 # Tools exposed by this agent (subset of the full Phase 3 registry)
 _CASHFLOW_TOOLS: list[tuple] = [
+    ("fetch_accounts", fetch_accounts_run, FetchAccountsInput),
     ("transaction_query", transaction_query_run, TransactionQueryInput),
     ("category_analysis", category_analysis_run, CategoryAnalysisInput),
     ("spending_trend", spending_trend_run, SpendingTrendInput),
@@ -50,15 +54,15 @@ class CashflowAgent(BaseAgent):
     """
 
     AGENT_ID = "cashflow_agent"
-    CAPABILITIES = ["cashflow", "spending", "budget"]
+    CAPABILITIES = ["cashflow", "spending", "budget", "accounts"]
 
-    def _build_tools(self) -> list[StructuredTool]:
+    def _build_tools(self, owner_id: str) -> list[StructuredTool]:
         return [
             StructuredTool(
                 name=name,
                 description=fn.__doc__ or name,
                 args_schema=schema,
-                coroutine=self._make_tool_bound(fn),
+                coroutine=self._make_tool_bound(fn, owner_id),
             )
             for name, fn, schema in _CASHFLOW_TOOLS
         ]

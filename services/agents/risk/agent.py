@@ -45,27 +45,25 @@ class RiskAgent(BaseAgent):
     AGENT_ID = "risk_agent"
     CAPABILITIES = ["risk", "insurance", "emergency_fund", "debt"]
 
-    def _build_tools(self) -> list[StructuredTool]:
+    def _build_tools(self, owner_id: str) -> list[StructuredTool]:
         return [
             StructuredTool(
                 name=name,
                 description=fn.__doc__ or name,
                 args_schema=schema,
-                coroutine=self._make_tool_bound(fn),
+                coroutine=self._make_tool_bound(fn, owner_id),
             )
             for name, fn, schema in _RISK_TOOLS
         ]
 
     def _system_prompt(self, user_profile: UserProfile) -> str:
         annual_income_paise = user_profile.total_monthly_income_paise * 12
-        owner_id = str(user_profile.owner_id)
         return (
             f"You are Artha, a personal finance risk advisor for {user_profile.name}. "
             f"You specialise in {', '.join(self.CAPABILITIES)} assessment. "
             "Use tools to retrieve real data — never guess amounts. "
             f"The user's annual income is approximately ₹{annual_income_paise / 100:,.0f}. "
             f"Family scope: {'yes' if user_profile.is_family_scope else 'no'}. "
-            f"CRITICAL: ALWAYS pass owner_id={owner_id} when calling ANY tool — it is REQUIRED. "
             "When calling insurance_coverage_gap, also pass annual_income_paise="
             f"{annual_income_paise} and is_family_scope={str(user_profile.is_family_scope).lower()}. "
             "Express amounts in Indian Rupee format (₹X,XX,XXX.XX). "

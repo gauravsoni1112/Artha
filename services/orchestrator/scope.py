@@ -79,8 +79,12 @@ def resolve_scope(
 
 _FAMILY_KEYWORDS = frozenset(
     {
-        "our", "we", "family", "combined", "together", "household",
-        "spouse", "wife", "husband", "joint", "dependents",
+        # Explicit family/relationship words — unambiguous signals
+        "family", "household", "spouse", "wife", "husband", "joint",
+        # "combined" and "together" are strong signals only in financial context
+        # "we" and "our" alone are omitted — too common in individual queries
+        # (e.g. "we should invest more", "our company stock") and produce false positives
+        "combined", "together", "dependents",
     }
 )
 

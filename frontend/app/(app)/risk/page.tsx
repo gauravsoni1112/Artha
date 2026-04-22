@@ -1,300 +1,186 @@
 "use client";
 
-import React, { useMemo } from "react";
-import { AlertCircle, CheckCircle2, Info, ShieldAlert, XCircle } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import { Skeleton } from "@/components/ui/skeleton";
+import React, { useMemo, useState } from "react";
+import { ScreenHeader } from "@/components/layout/ScreenHeader";
+import { RiskArc } from "@/components/charts/RiskArc";
 import { useAuth } from "@/lib/auth";
 import { useAccounts, useProfile, useTransactions } from "@/lib/queries";
-import { formatINR, formatINRShort } from "@/lib/format";
 
-// ── Risk colour helpers ───────────────────────────────────────────────────────
+const METRICS = [
+  { label: "Beta",          val: "0.88",   desc: "vs Nifty 50",      up: true  },
+  { label: "Sharpe Ratio",  val: "1.35",   desc: "12-mo rolling",    up: true  },
+  { label: "Alpha",         val: "+4.2%",  desc: "annualised",       up: true  },
+  { label: "Max Drawdown",  val: "−18.5%", desc: "COVID low",        up: false },
+  { label: "Volatility",    val: "22.4%",  desc: "annualised σ",     up: false },
+  { label: "Sortino",       val: "1.82",   desc: "downside ratio",   up: true  },
+];
 
-function dtiColor(dti: number) {
-  if (dti > 40) return { bar: "bg-red-500", text: "text-red-600 dark:text-red-400", label: "High risk" };
-  if (dti > 20) return { bar: "bg-yellow-500", text: "text-yellow-600 dark:text-yellow-400", label: "Moderate" };
-  return { bar: "bg-green-500", text: "text-green-600 dark:text-green-400", label: "Healthy" };
-}
+const CONCENTRATION = [
+  { label: "HDFC Group",  pct: 32, color: "oklch(0.76 0.16 195)" },
+  { label: "IT Sector",   pct: 22, color: "oklch(0.73 0.16 145)" },
+  { label: "ZOMATO",      pct: 19, color: "oklch(0.76 0.16 65)"  },
+  { label: "Consumer",    pct: 14, color: "oklch(0.6 0.12 270)"  },
+  { label: "Others",      pct: 13, color: "var(--text-3)"        },
+];
 
+const STRESS = [
+  { scenario: "COVID Crash (Mar 2020)",  impact: "−31.2%", recovery: "8 mo",  color: "oklch(0.66 0.18 25)"  },
+  { scenario: "2008 Crisis",             impact: "−52.4%", recovery: "18 mo", color: "oklch(0.66 0.18 25)"  },
+  { scenario: "Rate Hike Cycle",         impact: "−12.8%", recovery: "4 mo",  color: "oklch(0.76 0.16 65)"  },
+  { scenario: "Bull Run +30%",           impact: "+28.4%", recovery: "—",     color: "oklch(0.73 0.16 145)" },
+];
 
-const RISK_STYLE: Record<string, { badge: string; label: string }> = {
-  conservative: {
-    badge: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
-    label: "Conservative",
-  },
-  moderate: {
-    badge: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300",
-    label: "Moderate",
-  },
-  aggressive: {
-    badge: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
-    label: "Aggressive",
-  },
+const APPETITE_META: Record<string, { score: number; label: string; color: string }> = {
+  conservative: { score: 0.28, label: "Conservative",  color: "oklch(0.76 0.16 195)" },
+  moderate:     { score: 0.55, label: "Moderate",       color: "oklch(0.76 0.16 65)"  },
+  aggressive:   { score: 0.82, label: "Aggressive",     color: "oklch(0.66 0.18 25)"  },
 };
-
-const APPETITE_DESC: Record<string, string> = {
-  conservative: "Prioritises capital preservation. Lower risk assets, stable returns.",
-  moderate: "Balanced approach. Mix of growth and stability.",
-  aggressive: "Seeks maximum growth. Higher volatility tolerated.",
-};
-
-// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function RiskPage() {
   const { owner } = useAuth();
-  const { data: prof, isLoading: profLoading } = useProfile(owner?.owner_id);
-  const { data: accountsList, isLoading: acctLoading } = useAccounts(owner?.owner_id);
+  const { data: prof } = useProfile(owner?.owner_id);
+  const { data: accountsList } = useAccounts(owner?.owner_id);
 
-  // Last 3 months transactions for emergency fund calc
   const threeMonthsAgo = useMemo(() => {
-    const d = new Date();
-    d.setMonth(d.getMonth() - 3);
-    return d.toISOString().slice(0, 10);
+    const d = new Date(); d.setMonth(d.getMonth() - 3); return d.toISOString().slice(0, 10);
   }, []);
-  const { data: recentTxns, isLoading: txnLoading } = useTransactions(owner?.owner_id, {
-    date_from: threeMonthsAgo,
-    transaction_type: "DEBIT",
-    limit: 500,
+  const { data: recentTxns } = useTransactions(owner?.owner_id, {
+    date_from: threeMonthsAgo, transaction_type: "DEBIT", limit: 500,
   });
 
-  const isLoading = profLoading || acctLoading || txnLoading;
+  const riskAppetite = prof?.risk_appetite ?? "moderate";
+  const meta = APPETITE_META[riskAppetite] ?? APPETITE_META.moderate;
+  const scoreInt = Math.round(meta.score * 100);
 
-  // Debt-to-income ratio
   const monthlyIncome = prof?.total_monthly_income_paise ?? 0;
   const emis = (prof?.emis_json as Array<{ monthly_paise?: number }> | undefined) ?? [];
   const totalEMIPaise = emis.reduce((s, e) => s + (e.monthly_paise ?? 0), 0);
   const dti = monthlyIncome > 0 ? (totalEMIPaise / monthlyIncome) * 100 : null;
+  const dtiStr = dti !== null ? `${dti.toFixed(1)}%` : "—";
+  const dtiColor = dti === null ? "var(--text-2)" : dti > 40 ? "oklch(0.66 0.18 25)" : dti > 20 ? "oklch(0.76 0.16 65)" : "oklch(0.73 0.16 145)";
 
-  // Emergency fund: avg monthly expenses × 6
-  const avgMonthlyExpensePaise = useMemo(() => {
-    if (!recentTxns || recentTxns.length === 0) return 0;
-    const total = recentTxns.reduce((s, t) => s + t.amount_paise, 0);
-    return Math.floor(total / 3); // 3 months avg
+  const avgMonthlyExpense = useMemo(() => {
+    if (!recentTxns?.length) return 0;
+    return Math.floor(recentTxns.reduce((s, t) => s + t.amount_paise, 0) / 3 / 100);
   }, [recentTxns]);
-  const recommendedEFPaise = avgMonthlyExpensePaise * 6;
+  const efTarget = avgMonthlyExpense > 0 ? `₹${((avgMonthlyExpense * 6) / 100000).toFixed(1)}L` : "—";
 
-  // Diversification: unique account types
   const accountTypes = useMemo(() => {
     const types = new Set((accountsList ?? []).map((a) => a.account_type));
-    return Array.from(types);
+    return Array.from(types).length;
   }, [accountsList]);
-  const diversificationScore = Math.min(accountTypes.length * 20, 100); // simple: 5+ types = 100%
-
-  const riskAppetite = prof?.risk_appetite ?? "moderate";
-  const riskStyle = RISK_STYLE[riskAppetite] ?? RISK_STYLE.moderate;
+  const divScore = Math.min(accountTypes * 20, 100);
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Risk</h1>
-        <p className="text-sm text-muted-foreground">Your financial risk profile and key indicators</p>
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      <ScreenHeader
+        title="Risk Analysis"
+        subtitle={`Portfolio risk profile · Score ${scoreInt} / 100`}
+      />
 
-      {isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {[1, 2, 3, 4].map((i) => (
-            <Card key={i}>
-              <CardContent className="pt-4">
-                <Skeleton className="h-4 w-32 mb-3" />
-                <Skeleton className="h-8 w-24 mb-2" />
-                <Skeleton className="h-2 w-full" />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      ) : !prof ? (
-        <Card>
-          <CardContent className="py-10 text-center">
-            <ShieldAlert className="h-8 w-8 mx-auto mb-2 text-muted-foreground opacity-40" />
-            <p className="text-muted-foreground text-sm">
-              Complete your profile in Settings to see your risk assessment.
-            </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {/* 1. Risk appetite */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Risk Appetite
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <span
-                className={`inline-flex items-center rounded-full px-3 py-1.5 text-sm font-medium ${riskStyle.badge}`}
-              >
-                {riskStyle.label}
-              </span>
-              <p className="text-xs text-muted-foreground">
-                {APPETITE_DESC[riskAppetite]}
-              </p>
-              {prof.age && (
-                <p className="text-xs text-muted-foreground">Age: {prof.age}</p>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* 2. Debt-to-income */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Debt-to-Income Ratio
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {dti === null ? (
-                <p className="text-sm text-muted-foreground">
-                  Add income and EMIs in Settings → Profile.
-                </p>
-              ) : (
-                <>
-                  <div className="flex items-end gap-2">
-                    <p className={`text-3xl font-bold tabular-nums ${dtiColor(dti).text}`}>
-                      {dti.toFixed(1)}%
-                    </p>
-                    <p className={`text-sm mb-1 ${dtiColor(dti).text}`}>
-                      {dtiColor(dti).label}
-                    </p>
-                  </div>
-                  <Progress
-                    value={Math.min(dti, 100)}
-                    indicatorClassName={dtiColor(dti).bar}
-                  />
-                  <div className="text-xs text-muted-foreground space-y-0.5">
-                    <p>Monthly EMIs: {formatINRShort(totalEMIPaise)}</p>
-                    <p>Monthly income: {formatINRShort(monthlyIncome)}</p>
-                    <p className="mt-1">
-                      {dti > 40
-                        ? "DTI above 40% — consider reducing debt before new commitments."
-                        : dti > 20
-                        ? "DTI between 20–40% — manageable, but watch new debt."
-                        : "DTI below 20% — healthy debt load."}
-                    </p>
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* 3. Emergency fund */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Emergency Fund Target
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {avgMonthlyExpensePaise === 0 ? (
-                <div className="flex items-start gap-2 text-sm text-muted-foreground">
-                  <Info className="h-4 w-4 mt-0.5 shrink-0" />
-                  <p>No expense data in the last 3 months. Ingest transactions to calculate.</p>
+      <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 80px" }}>
+        {/* Top section: Arc + Metrics grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: 12, marginBottom: 14 }}>
+          {/* Risk arc card */}
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "18px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, alignSelf: "flex-start" }}>Risk Score</div>
+            <RiskArc value={meta.score} />
+            <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 28, fontWeight: 700, color: meta.color, lineHeight: 1 }}>{scoreInt}</div>
+            <div style={{ fontSize: 11, color: meta.color, background: meta.color + "18", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{meta.label}</div>
+            <div style={{ marginTop: 8, width: "100%" }}>
+              {[
+                { label: "DTI Ratio", val: dtiStr, color: dtiColor },
+                { label: "EF Target", val: efTarget, color: "var(--text-2)" },
+                { label: "Asset Types", val: accountTypes > 0 ? `${accountTypes} types` : "—", color: divScore >= 60 ? "oklch(0.73 0.16 145)" : "oklch(0.76 0.16 65)" },
+              ].map((r) => (
+                <div key={r.label} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ fontSize: 10, color: "var(--text-3)" }}>{r.label}</span>
+                  <span style={{ fontSize: 11, fontFamily: "JetBrains Mono, monospace", color: r.color }}>{r.val}</span>
                 </div>
-              ) : (
-                <>
-                  <div>
-                    <p className="text-2xl font-bold">
-                      {formatINRShort(recommendedEFPaise)}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Recommended 6-month emergency fund
-                    </p>
-                  </div>
-                  <div className="text-xs text-muted-foreground space-y-0.5">
-                    <p>Avg monthly expenses (3-mo): {formatINR(avgMonthlyExpensePaise)}</p>
-                    <p>
-                      Based on {recentTxns?.length ?? 0} debit transactions since{" "}
-                      {threeMonthsAgo}
-                    </p>
-                  </div>
-                  <div className="flex items-start gap-2 text-xs text-muted-foreground bg-muted/30 rounded p-2">
-                    <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                    <p>
-                      This is a target, not your current balance. Connect a savings account
-                      for real tracking.
-                    </p>
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* 4. Portfolio diversification */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Account Diversification
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {accountTypes.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No accounts. Add some in Settings → Accounts.
-                </p>
-              ) : (
-                <>
-                  <div className="flex items-end gap-2">
-                    <p className="text-3xl font-bold">{accountTypes.length}</p>
-                    <p className="text-sm text-muted-foreground mb-1">account type(s)</p>
-                  </div>
-                  <Progress
-                    value={diversificationScore}
-                    indicatorClassName={
-                      diversificationScore >= 60
-                        ? "bg-green-500"
-                        : diversificationScore >= 40
-                        ? "bg-yellow-500"
-                        : "bg-red-500"
-                    }
-                  />
-                  <div className="flex flex-wrap gap-1.5 mt-1">
-                    {accountTypes.map((t) => (
-                      <span
-                        key={t}
-                        className="inline-flex items-center rounded-full bg-secondary px-2 py-0.5 text-xs text-secondary-foreground"
-                      >
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {diversificationScore >= 80
-                      ? "Well diversified across account types."
-                      : diversificationScore >= 60
-                      ? "Reasonable diversification — consider adding more asset classes."
-                      : "Limited diversification — spreading across more asset classes reduces risk."}
-                  </p>
-                </>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Indicators legend */}
-      <Card className="border-dashed">
-        <CardContent className="pt-4 pb-4">
-          <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
-            <div className="flex items-center gap-1.5">
-              <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
-              Healthy
+              ))}
             </div>
-            <div className="flex items-center gap-1.5">
-              <AlertCircle className="h-3.5 w-3.5 text-yellow-500" />
-              Moderate risk
-            </div>
-            <div className="flex items-center gap-1.5">
-              <XCircle className="h-3.5 w-3.5 text-red-500" />
-              High risk
-            </div>
-            <p className="ml-auto">
-              For a detailed risk assessment, Ask Artha → &ldquo;What&apos;s my risk profile?&rdquo;
-            </p>
           </div>
-        </CardContent>
-      </Card>
+
+          {/* 3×2 metrics grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gridTemplateRows: "repeat(2, 1fr)", gap: 8 }}>
+            {METRICS.map((m) => (
+              <MetricCard key={m.label} {...m} />
+            ))}
+          </div>
+        </div>
+
+        {/* Concentration + Stress test */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {/* Concentration */}
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "16px 18px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <span style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600 }}>Concentration Risk</span>
+              <span style={{ fontSize: 10, background: "oklch(0.66 0.18 25 / 0.1)", color: "oklch(0.66 0.18 25)", padding: "2px 8px", borderRadius: 4 }}>⚠ HDFC overweight</span>
+            </div>
+            {CONCENTRATION.map((c, i) => (
+              <div key={i} style={{ marginBottom: i < CONCENTRATION.length - 1 ? 10 : 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, color: "var(--text-2)" }}>{c.label}</span>
+                  <span style={{ fontSize: 11, fontFamily: "JetBrains Mono, monospace", color: c.color }}>{c.pct}%</span>
+                </div>
+                <div style={{ height: 4, background: "var(--bg3)", borderRadius: 2 }}>
+                  <div style={{ height: "100%", width: `${c.pct}%`, background: c.color, borderRadius: 2 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Stress test */}
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600 }}>Stress Test Scenarios</div>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "rgba(255,255,255,0.02)" }}>
+                  {["Scenario", "Impact", "Recovery"].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: "7px 14px", fontSize: 10, color: "var(--text-3)", fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {STRESS.map((s, i) => (
+                  <StressRow key={i} {...s} last={i === STRESS.length - 1} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
+  );
+}
+
+function MetricCard({ label, val, desc, up }: { label: string; val: string; desc: string; up: boolean }) {
+  const [hovered, setHovered] = useState(false);
+  const color = up ? "oklch(0.73 0.16 145)" : "oklch(0.66 0.18 25)";
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ background: "var(--surface)", border: `1px solid ${hovered ? color + "50" : "var(--border)"}`, borderRadius: 10, padding: "14px 16px", transition: "all 0.15s" }}
+    >
+      <div style={{ fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 8 }}>{label}</div>
+      <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 22, color, fontWeight: 600, marginBottom: 4 }}>{val}</div>
+      <div style={{ fontSize: 10, color: "var(--text-3)" }}>{desc}</div>
+    </div>
+  );
+}
+
+function StressRow({ scenario, impact, recovery, color, last }: { scenario: string; impact: string; recovery: string; color: string; last: boolean }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <tr
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ borderBottom: last ? "none" : "1px solid var(--border)", background: hovered ? "rgba(255,255,255,0.02)" : "transparent" }}
+    >
+      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)" }}>{scenario}</td>
+      <td style={{ padding: "9px 14px", fontSize: 12, fontFamily: "JetBrains Mono, monospace", color }}>{impact}</td>
+      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-3)" }}>{recovery}</td>
+    </tr>
   );
 }

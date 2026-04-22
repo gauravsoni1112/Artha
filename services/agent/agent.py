@@ -28,7 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import MessagesState
 from langgraph.prebuilt import ToolNode
 from sqlalchemy import select, func as sqlfunc
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typing_extensions import TypedDict
 
 from libs.schemas.db_models import AgentRun, ChatSession
@@ -76,13 +76,32 @@ class ArthaAgent:
         response = await agent.chat(owner_id="...", message="What did I spend on groceries last month?")
     """
 
-    def __init__(self, session: AsyncSession, config: LLMConfig | None = None) -> None:
-        self._session = session
-        self._config = config or LLMConfig.from_env()
-        self._graph = self._build_graph()
+    def __init__(
+        self,
+        session_factory: async_sessionmaker | None = None,
+        config: LLMConfig | None = None,
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        if session_factory is not None:
+            self._session_factory = session_factory
+        elif session is not None:
+            # Legacy path — wrap a single session so async-with callers work.
+            # Only safe for sequential DB access (integration tests / single-turn use).
+            from contextlib import asynccontextmanager
 
-    def _build_graph(self):
-        tools = build_langchain_tools(self._session)
+            @asynccontextmanager
+            async def _wrap():
+                yield session
+
+            self._session_factory = _wrap
+        else:
+            raise ValueError("Either session_factory or session must be provided")
+
+        self._config = config or LLMConfig.from_env()
+
+    def _build_graph(self, owner_id: str):
+        tools = build_langchain_tools(self._session_factory, owner_id)
         llm = self._config.build_chat_model()
         llm_with_tools = llm.bind_tools(tools)
         tool_node = ToolNode(tools)
@@ -133,19 +152,9 @@ class ArthaAgent:
             original_messages = state["messages"]
             observations: list[str] = list(state.get("step_observations") or [])
 
-            # Extract owner_id token from the first human message
-            owner_token = ""
-            for m in original_messages:
-                if isinstance(m, HumanMessage):
-                    content = m.content
-                    if content.startswith("[owner_id="):
-                        owner_token = content.split("]")[0] + "] "
-                    break
-
             # Execute each plan step through the inner assistant↔tools loop
             for step in plan.steps:
-                step_question = f"{owner_token}{step}"
-                step_state = {"messages": [HumanMessage(content=step_question)]}
+                step_state = {"messages": [HumanMessage(content=step)]}
                 step_result = await inner_graph.ainvoke(
                     step_state,
                     config={"recursion_limit": self._recursion_limit},
@@ -158,7 +167,7 @@ class ArthaAgent:
             # If multi-step, synthesise a final answer from all observations
             if len(plan.steps) > 1:
                 synthesis_prompt = (
-                    f"{owner_token}Based on the following step-by-step observations, "
+                    "Based on the following step-by-step observations, "
                     "provide a concise final answer to the original question.\n\n"
                     + "\n\n".join(observations)
                     + f"\n\nOriginal question: {original_messages[-1].content if original_messages else ''}"
@@ -222,9 +231,7 @@ class ArthaAgent:
         with start_span("agent.chat", {"owner_id": owner_id, "session_id": session_id}):
             log.info("agent.graph.start", owner_id=owner_id, session_id=session_id)
 
-            # Inject owner_id into the message so tools can use it without exposing
-            # it to the LLM as a separate field.
-            augmented = f"[owner_id={owner_id}] {message}"
+            graph = self._build_graph(owner_id)
 
             # Load prior session messages for multi-turn context + compact if needed
             prior_messages, new_summary = await self._load_and_compact_context(
@@ -232,7 +239,7 @@ class ArthaAgent:
                 llm=self._planner._llm,
             )
 
-            initial_messages = prior_messages + [HumanMessage(content=augmented)]
+            initial_messages = prior_messages + [HumanMessage(content=message)]
             initial_state = {
                 "messages": initial_messages,
                 "plan": None,
@@ -243,7 +250,7 @@ class ArthaAgent:
                 "reflect_count": 0,
             }
 
-            result = await self._graph.ainvoke(
+            result = await graph.ainvoke(
                 initial_state,
                 config={"recursion_limit": self._recursion_limit},
             )
@@ -325,7 +332,8 @@ class ArthaAgent:
 
         try:
             sess_uuid = uuid.UUID(session_id)
-            chat_session = await self._session.get(ChatSession, sess_uuid)
+            async with self._session_factory() as db:
+                chat_session = await db.get(ChatSession, sess_uuid)
             if chat_session is None:
                 return [], None
 
@@ -413,49 +421,50 @@ class ArthaAgent:
         """
         owner_uuid = uuid.UUID(owner_id)
 
-        # Resolve or create session
-        if session_id:
-            sess_uuid = uuid.UUID(session_id)
-            chat_session = await self._session.get(ChatSession, sess_uuid)
-            if chat_session is None:
-                log.error("agent.persist.session_not_found", session_id=session_id)
-                raise ValueError(f"Session {session_id} not found")
-            # Count existing turns to set turn_index
-            count_stmt = select(sqlfunc.count()).select_from(AgentRun).where(AgentRun.session_id == sess_uuid)
-            turn_index = (await self._session.scalar(count_stmt)) or 0
-            # Persist compaction summary if produced this turn
-            if context_summary:
-                chat_session.summary = context_summary
-        else:
-            # Create new session from first message
-            chat_session = ChatSession(
-                owner_id=owner_uuid,
-                title=user_message[:80],  # First 80 chars
-                status="ACTIVE",
-            )
-            self._session.add(chat_session)
-            await self._session.flush()
-            turn_index = 0
+        async with self._session_factory() as db:
+            # Resolve or create session
+            if session_id:
+                sess_uuid = uuid.UUID(session_id)
+                chat_session = await db.get(ChatSession, sess_uuid)
+                if chat_session is None:
+                    log.error("agent.persist.session_not_found", session_id=session_id)
+                    raise ValueError(f"Session {session_id} not found")
+                # Count existing turns to set turn_index
+                count_stmt = select(sqlfunc.count()).select_from(AgentRun).where(AgentRun.session_id == sess_uuid)
+                turn_index = (await db.scalar(count_stmt)) or 0
+                # Persist compaction summary if produced this turn
+                if context_summary:
+                    chat_session.summary = context_summary
+            else:
+                # Create new session from first message
+                chat_session = ChatSession(
+                    owner_id=owner_uuid,
+                    title=user_message[:80],  # First 80 chars
+                    status="ACTIVE",
+                )
+                db.add(chat_session)
+                await db.flush()
+                turn_index = 0
 
-        # Create agent run record
-        run = AgentRun(
-            session_id=chat_session.id,
-            owner_id=owner_uuid,
-            user_message=user_message,
-            assistant_response=response_text,
-            tool_calls=tool_calls,
-            messages_trace=messages_trace,
-            scratchpad=scratchpad or None,
-            confidence_score=confidence_score,
-            reflection_notes=reflection_notes,
-            turn_index=turn_index,
-            status="OK",
-            error_message=None,
-            started_at=started_at,
-            completed_at=datetime.now(timezone.utc),
-        )
-        self._session.add(run)
-        await self._session.commit()
+            # Create agent run record
+            run = AgentRun(
+                session_id=chat_session.id,
+                owner_id=owner_uuid,
+                user_message=user_message,
+                assistant_response=response_text,
+                tool_calls=tool_calls,
+                messages_trace=messages_trace,
+                scratchpad=scratchpad or None,
+                confidence_score=confidence_score,
+                reflection_notes=reflection_notes,
+                turn_index=turn_index,
+                status="OK",
+                error_message=None,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            db.add(run)
+            await db.commit()
 
         log.info(
             "agent.persist.complete",

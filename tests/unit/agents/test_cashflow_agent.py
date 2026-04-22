@@ -29,10 +29,11 @@ def test_capabilities_contain_expected_tags():
     assert "cashflow" in caps
     assert "spending" in caps
     assert "budget" in caps
+    assert "accounts" in caps
 
 
 def test_capabilities_length():
-    assert len(CashflowAgent.CAPABILITIES) == 3
+    assert len(CashflowAgent.CAPABILITIES) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ def test_capabilities_length():
 
 
 _EXPECTED_TOOL_NAMES = {
+    "fetch_accounts",
     "transaction_query",
     "category_analysis",
     "spending_trend",
@@ -55,7 +57,7 @@ def test_cashflow_tool_names_match_expected():
 
 
 def test_cashflow_tools_count():
-    assert len(_CASHFLOW_TOOLS) == 5
+    assert len(_CASHFLOW_TOOLS) == 6
 
 
 def test_cashflow_tools_have_schemas():
@@ -83,28 +85,28 @@ def _make_agent() -> CashflowAgent:
     return agent
 
 
-def test_build_tools_returns_five_tools():
+def test_build_tools_returns_six_tools():
     agent = _make_agent()
-    tools = agent._build_tools()
-    assert len(tools) == 5
+    tools = agent._build_tools("00000000-0000-0000-0000-000000000001")
+    assert len(tools) == 6
 
 
 def test_build_tools_names():
     agent = _make_agent()
-    tool_names = {t.name for t in agent._build_tools()}
+    tool_names = {t.name for t in agent._build_tools("00000000-0000-0000-0000-000000000001")}
     assert tool_names == _EXPECTED_TOOL_NAMES
 
 
 def test_build_tools_are_async():
     """All cashflow tools must be coroutine-based (async)."""
     agent = _make_agent()
-    for tool in agent._build_tools():
+    for tool in agent._build_tools("00000000-0000-0000-0000-000000000001"):
         assert tool.coroutine is not None, f"tool '{tool.name}' is not async"
 
 
 def test_build_tools_have_descriptions():
     agent = _make_agent()
-    for tool in agent._build_tools():
+    for tool in agent._build_tools("00000000-0000-0000-0000-000000000001"):
         assert tool.description, f"tool '{tool.name}' has no description"
 
 

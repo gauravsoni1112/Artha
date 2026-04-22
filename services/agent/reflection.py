@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from typing import Any
 
 import structlog
@@ -32,7 +31,34 @@ log = structlog.get_logger(__name__)
 REFLECTION_THRESHOLD: float = float(os.getenv("REFLECTION_THRESHOLD", "0.7"))
 MAX_REFLECT_ITERATIONS: int = int(os.getenv("MAX_REFLECT_ITERATIONS", "2"))
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+def _extract_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object from *text*, or None."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 _REFLECTION_SYSTEM = """\
 You are a financial answer quality evaluator.
@@ -186,22 +212,23 @@ class ReflectionNode:
             return ReflectionResult.fallback()
 
     def _parse(self, content: str) -> ReflectionResult:
-        match = _JSON_RE.search(content)
-        if not match:
-            return ReflectionResult.fallback()
-        try:
-            data = json.loads(match.group())
-            score = float(data.get("confidence_score", 0.5))
-            score = max(0.0, min(1.0, score))  # clamp to [0, 1]
-            is_complete = bool(data.get("is_complete", True))
-            notes = str(data.get("reflection_notes", ""))
-            needs_rerun = not is_complete and score < REFLECTION_THRESHOLD
-            return ReflectionResult(
-                confidence_score=score,
-                is_complete=is_complete,
-                reflection_notes=notes,
-                needs_rerun=needs_rerun,
-            )
-        except Exception as exc:
-            log.warning("reflection.parse_error", error=str(exc), raw=content[:200])
-            return ReflectionResult.fallback()
+        for candidate in (content.strip(), _extract_json_object(content)):
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+                score = float(data.get("confidence_score", 0.5))
+                score = max(0.0, min(1.0, score))  # clamp to [0, 1]
+                is_complete = bool(data.get("is_complete", True))
+                notes = str(data.get("reflection_notes", ""))
+                needs_rerun = not is_complete and score < REFLECTION_THRESHOLD
+                return ReflectionResult(
+                    confidence_score=score,
+                    is_complete=is_complete,
+                    reflection_notes=notes,
+                    needs_rerun=needs_rerun,
+                )
+            except Exception:
+                continue
+        log.warning("reflection.parse_error", raw=content[:200])
+        return ReflectionResult.fallback()

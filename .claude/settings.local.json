@@ -63,7 +63,21 @@
       "Bash(git reset *)",
       "Bash(git checkout *)",
       "Bash(git clean *)",
-      "Bash(awk '{print $NF}')"
+      "Bash(awk '{print $NF}')",
+      "Read(//Users/soni/.venv/**)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(/opt/homebrew/bin/python3.12 -m pytest tests/unit/agent/test_planner.py tests/unit/agent/test_reflection.py tests/unit/orchestrator/test_scope.py tests/unit/agent/test_scratchpad.py tests/unit/agent/test_agent_router.py tests/unit/agent/test_agent_answer.py -v)",
+      "Read(//Users/soni/.local/bin/**)",
+      "Read(//Users/soni/.pyenv/versions/**)",
+      "Read(//Users/soni/**)",
+      "Bash(git stash *)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(cp \"/Users/soni/.claude/projects/-Users-soni-Documents-workspace-Artha/5a50e45f-eaef-4750-9c35-de187cfe0c8f/tool-results/webfetch-1776791039332-ghgu82.bin\" /tmp/design.gz)",
+      "Bash(gunzip -f /tmp/design.gz)",
+      "Read(//tmp/**)",
+      "Bash(mkdir -p /tmp/design_files)",
+      "Bash(tar -xf /tmp/design -C /tmp/design_files)"
     ]
   }
 }

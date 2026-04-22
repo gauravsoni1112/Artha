@@ -82,16 +82,16 @@ def _make_agent() -> RiskAgent:
 
 
 def test_build_tools_names():
-    assert {t.name for t in _make_agent()._build_tools()} == _EXPECTED_TOOLS
+    assert {t.name for t in _make_agent()._build_tools("00000000-0000-0000-0000-000000000001")} == _EXPECTED_TOOLS
 
 
 def test_build_tools_are_async():
-    for t in _make_agent()._build_tools():
+    for t in _make_agent()._build_tools("00000000-0000-0000-0000-000000000001"):
         assert t.coroutine is not None, f"tool '{t.name}' is not async"
 
 
 def test_build_tools_have_descriptions():
-    for t in _make_agent()._build_tools():
+    for t in _make_agent()._build_tools("00000000-0000-0000-0000-000000000001"):
         assert t.description, f"tool '{t.name}' has no description"
 
 
@@ -132,22 +132,22 @@ def test_system_prompt_family_scope():
 
 
 def test_emergency_fund_defaults():
-    inp = EmergencyFundMonthsInput(owner_id="00000000-0000-0000-0000-000000000001")
+    inp = EmergencyFundMonthsInput()
     assert inp.expense_months == 3
 
 
 def test_asset_concentration_defaults():
-    inp = AssetConcentrationInput(owner_id="00000000-0000-0000-0000-000000000001")
+    inp = AssetConcentrationInput()
     assert inp.concentration_threshold_pct == pytest.approx(40.0)
 
 
 def test_debt_to_income_defaults():
-    inp = DebtToIncomeInput(owner_id="00000000-0000-0000-0000-000000000001")
+    inp = DebtToIncomeInput()
     assert inp.months == 3
 
 
 def test_insurance_coverage_gap_defaults():
-    inp = InsuranceCoverageGapInput(owner_id="00000000-0000-0000-0000-000000000001")
+    inp = InsuranceCoverageGapInput()
     assert inp.annual_income_paise == 0
     assert inp.is_family_scope is False
     assert inp.existing_life_cover_paise == 0

@@ -14,6 +14,10 @@ const config: Config = {
       screens: { "2xl": "1400px" },
     },
     extend: {
+      fontFamily: {
+        sans: ["Space Grotesk", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
+        mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -47,6 +51,15 @@ const config: Config = {
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
+        },
+        // Artha design tokens
+        artha: {
+          bg: "#07080F",
+          bg2: "#0C0E1A",
+          bg3: "#111425",
+          text: "#DDE3F0",
+          text2: "#8A95B0",
+          text3: "#4D5670",
         },
       },
       borderRadius: {

@@ -50,6 +50,7 @@ from libs.telemetry.langfuse_handler import (
 from libs.telemetry.tracing import start_span
 from services.agent.config import LLMConfig, LLMRole, RoutingPolicy
 from services.agent.context import compact_messages
+from services.agent.grounding import check_answer_grounding
 from services.agent.reflection import ReflectionNode
 
 log = structlog.get_logger(__name__)
@@ -97,39 +98,40 @@ class BaseAgent(ABC):
         self._reflector = ReflectionNode(llm=self._reflector_llm)
         # Local fallback reflector — used when cloud PII scan raises
         self._local_reflector = ReflectionNode(llm=self._executor_llm)
-        self._graph = self._build_graph()
 
     # ------------------------------------------------------------------
     # Subclass interface
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def _build_tools(self) -> list:
-        """Return LangChain-compatible tools for this agent's domain."""
+    def _build_tools(self, owner_id: str) -> list:
+        """Return LangChain-compatible tools for this agent's domain.
 
-    def _make_tool_bound(self, fn) -> Any:
-        """Return an async callable that opens a fresh session per invocation.
+        owner_id must be bound server-side in each tool's closure so the LLM
+        cannot substitute a different owner's UUID via prompt injection.
+        """
 
-        This prevents concurrent tool calls from sharing an AsyncSession, which
-        causes SQLAlchemy IllegalStateChangeError when ToolNode runs tools via
-        asyncio.gather.
+    def _make_tool_bound(self, fn, owner_id: str) -> Any:
+        """Return an async callable that opens a fresh session and enforces owner_id.
+
+        - Fresh session per call prevents concurrent SQLAlchemy state corruption.
+        - owner_id is supplied by the server; any value the LLM passes is discarded.
         """
         sf = self._session_factory
 
         async def _bound(**kwargs):
+            kwargs.pop("owner_id", None)  # discard any LLM-supplied value
             async with sf() as session:
-                return (await fn(session=session, **kwargs)).to_llm_str()
+                return (await fn(session=session, owner_id=owner_id, **kwargs)).to_llm_str()
 
         return _bound
 
     def _system_prompt(self, user_profile: UserProfile) -> str:
         """Override to inject domain-specific instructions."""
-        owner_id = str(user_profile.owner_id)
         return (
             f"You are Artha, a personal finance assistant for {user_profile.name}. "
             f"You specialise in {', '.join(self.CAPABILITIES)} analysis. "
             "Use tools to retrieve real data — never guess amounts. "
-            f"CRITICAL: ALWAYS pass owner_id={owner_id} when calling ANY tool — it is REQUIRED. "
             "For optional parameters (start_date, end_date, category, account_id, etc.): "
             "only include them if the user specifically asked for those filters. "
             "If not specified, omit them and let them default to None. "
@@ -204,6 +206,8 @@ class BaseAgent(ABC):
     async def _execute(
         self, request: AgentRequest, tm: TokenMap
     ) -> tuple[dict[str, Any], float, RiskLevel, str, list[str], list[datetime], list[str]]:
+        owner_id = str(request.user_profile.owner_id)
+        graph = self._build_graph(owner_id)
         system_msg = SystemMessage(content=self._system_prompt(request.user_profile))
         human_msg = HumanMessage(content=request.query)
 
@@ -223,6 +227,7 @@ class BaseAgent(ABC):
         all_warnings: list[str] = []
         tool_freshness: list[datetime] = []
         all_tools_used: list[str] = []
+        all_tool_outputs: list[str] = []  # raw tool result strings for grounding check
 
         _lf_meta = {"agent_id": self.AGENT_ID, "query_preview": request.query[:80]}
         _lf_kwargs = dict(
@@ -260,7 +265,7 @@ class BaseAgent(ABC):
             executor_callbacks = [executor_handler] if executor_handler is not None else []
             reflector_callbacks = [reflector_handler] if reflector_handler is not None else []
 
-            graph_state = await self._graph.ainvoke(
+            graph_state = await graph.ainvoke(
                 {"messages": messages},
                 config={"recursion_limit": _RECURSION_LIMIT, "callbacks": executor_callbacks},
             )
@@ -273,6 +278,7 @@ class BaseAgent(ABC):
 
             tool_freshness.extend(_extract_freshness(final_messages))
             all_tools_used.extend(_extract_tool_names(final_messages))
+            all_tool_outputs.extend(_extract_tool_outputs(final_messages))
 
             # Choose reflector and messages — scrub PII if cloud
             reflector, reflect_messages = self._prepare_reflection(final_messages, tm)
@@ -338,6 +344,24 @@ class BaseAgent(ABC):
 
         end_callback_span(compactor_handler)
 
+        # Numeric grounding check — cap confidence if answer cites ₹ figures
+        # that cannot be traced to any tool output (possible hallucination).
+        answer_text = best_result.get("answer", "")
+        is_grounded, ungrounded = check_answer_grounding(answer_text, all_tool_outputs)
+        if not is_grounded:
+            ungrounded_rupees = [f"₹{p / 100:,.0f}" for p in ungrounded]
+            warning = (
+                f"Answer may contain unverified amounts: {', '.join(ungrounded_rupees)}. "
+                "Please verify against your source documents."
+            )
+            all_warnings.append(warning)
+            best_confidence = min(best_confidence, 0.5)
+            log.warning(
+                "agent.grounding.unverified",
+                agent_id=self.AGENT_ID,
+                ungrounded=ungrounded_rupees,
+            )
+
         # Attach confidence as a scored metric on the Langfuse trace so runs can
         # be filtered/sliced by agent confidence in the dashboard.
         score_trace(str(request.trace_id), name=f"{self.AGENT_ID}.confidence", value=best_confidence)
@@ -400,8 +424,8 @@ class BaseAgent(ABC):
     # Graph construction (inner assistant↔tools loop)
     # ------------------------------------------------------------------
 
-    def _build_graph(self):
-        tools = self._build_tools()
+    def _build_graph(self, owner_id: str):
+        tools = self._build_tools(owner_id)
         llm_with_tools = self._executor_llm.bind_tools(tools)
         tool_node = ToolNode(tools)
 
@@ -427,6 +451,16 @@ class BaseAgent(ABC):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _extract_tool_outputs(messages: list) -> list[str]:
+    """Collect string content from ToolMessages for grounding checks."""
+    from langchain_core.messages import ToolMessage
+    return [
+        msg.content
+        for msg in messages
+        if isinstance(msg, ToolMessage) and isinstance(msg.content, str)
+    ]
 
 
 def _extract_tool_names(messages: list) -> list[str]:
