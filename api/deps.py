@@ -152,3 +152,9 @@ async def require_admin(owner: Annotated[Owner, Depends(current_owner)]) -> Owne
     if not owner.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return owner
+
+
+def check_owner_access(requesting_owner: Owner, target_owner_id: uuid.UUID) -> None:
+    """Raise 403 if requesting_owner is neither admin nor the target owner."""
+    if not requesting_owner.is_admin and requesting_owner.id != target_owner_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")

@@ -11,7 +11,9 @@ import type {
   AuditRecommendation,
   FamilyMember,
   FinancialGoal,
+  Holding,
   IngestionRun,
+  NetWorthResponse,
   Owner,
   QuarantineRecord,
   RecommendationEventRequest,
@@ -19,6 +21,7 @@ import type {
   RecommendationRequest,
   RecommendationResponse,
   RecommendationSummary,
+  TaxDataRecord,
   TokenResponse,
   Transaction,
   UserProfile,
@@ -363,6 +366,30 @@ export const staticData = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+};
+
+// ---------------------------------------------------------------------------
+// Holdings
+// ---------------------------------------------------------------------------
+
+export const holdings = {
+  list: (ownerId: string) => request<Holding[]>(`/owners/${ownerId}/holdings`),
+};
+
+// ---------------------------------------------------------------------------
+// Net Worth
+// ---------------------------------------------------------------------------
+
+export const netWorth = {
+  get: (ownerId: string) => request<NetWorthResponse>(`/owners/${ownerId}/net-worth`),
+};
+
+// ---------------------------------------------------------------------------
+// Tax Data
+// ---------------------------------------------------------------------------
+
+export const taxData = {
+  list: (ownerId: string) => request<TaxDataRecord[]>(`/owners/${ownerId}/tax-data`),
 };
 
 // ---------------------------------------------------------------------------

@@ -25,6 +25,63 @@ export interface Account {
   nickname: string | null;
   is_active: boolean;
   created_at: string;
+  balance_paise: number | null;
+}
+
+// ── Holdings ─────────────────────────────────────────────────────────────────
+
+export interface Holding {
+  id: string;
+  account_id: string | null;
+  asset_class: string;
+  instrument_name: string;
+  units: number | null;
+  nav_paise: number | null;
+  purchase_price_paise: number | null;
+  current_value_paise: number | null;
+  valuation_date: string | null;
+  avg_cost_paise: number | null;
+  pl_paise: number | null;
+  pl_pct: number | null;
+  xirr: number | null;
+  day_change_pct: number | null;
+}
+
+// ── Net Worth ─────────────────────────────────────────────────────────────────
+
+export interface MonthlyNetWorth {
+  month: string;
+  net_worth_paise: number;
+  change_paise: number;
+  change_pct: number | null;
+}
+
+export interface AssetCategory {
+  label: string;
+  value_paise: number;
+  pct: number;
+  delta_paise: number;
+}
+
+export interface NetWorthResponse {
+  total_assets_paise: number;
+  total_liabilities_paise: number;
+  net_worth_paise: number;
+  history: MonthlyNetWorth[];
+  assets_by_category: AssetCategory[];
+}
+
+// ── Tax Data ──────────────────────────────────────────────────────────────────
+
+export interface TaxDataRecord {
+  id: string;
+  fiscal_year: string;
+  gross_income_paise: number | null;
+  taxable_income_paise: number | null;
+  tax_paid_paise: number | null;
+  tds_paise: number | null;
+  itr_filed: boolean;
+  created_at: string;
 }
 
 export interface FinancialGoal {

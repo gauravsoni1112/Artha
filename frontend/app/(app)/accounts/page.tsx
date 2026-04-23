@@ -1,52 +1,164 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { useAuth } from "@/lib/auth";
-import { useAccounts } from "@/lib/queries";
+import { useAccounts, useTransactions } from "@/lib/queries";
+import { formatINRShort } from "@/lib/format";
 
-const DEMO_ACCOUNTS = [
-  { icon: "🏦", name: "HDFC Savings",  num: "••••4821",    bal: "₹4.2L",  sub: "Last sync 2m ago",   synced: true,  data: [4.0,3.8,4.1,3.9,4.0,4.2,4.2], color: "oklch(0.73 0.16 145)", type: "Bank",         credit: false },
-  { icon: "📈", name: "Zerodha",        num: "DQ8291",      bal: "₹6.1L",  sub: "47 holdings · Live", synced: true,  data: [5.2,5.8,5.5,6.0,5.9,6.2,6.1], color: "oklch(0.76 0.16 195)", type: "Broker",        credit: false },
-  { icon: "💼", name: "MF Portfolio",   num: "CAMS Linked", bal: "₹3.1L",  sub: "12 schemes",         synced: true,  data: [2.6,2.7,2.9,3.0,2.9,3.1,3.1], color: "oklch(0.6 0.12 270)",  type: "Mutual Fund",   credit: false },
-  { icon: "💳", name: "HDFC Credit",    num: "••••7219",    bal: "−₹32K",  sub: "Due May 5",          synced: true,  data: [0,8,15,22,28,32,32],           color: "oklch(0.66 0.18 25)",  type: "Credit Card",   credit: true  },
-  { icon: "🏦", name: "SBI FD",         num: "3 deposits",  bal: "₹80L",   sub: "Matures Jun 2026",   synced: false, data: [72,74,76,78,78,80,80],         color: "oklch(0.76 0.16 65)",  type: "Fixed Deposit", credit: false },
-  { icon: "🥇", name: "Digital Gold",   num: "Groww Linked",bal: "₹45K",   sub: "12.4g · ₹3,621/g",  synced: true,  data: [38,40,41,43,44,44,45],         color: "oklch(0.82 0.14 80)",  type: "Commodity",     credit: false },
-];
+function accountIcon(type: string): string {
+  const icons: Record<string, string> = {
+    SAVINGS: "🏦", CURRENT: "🏦", SALARY: "🏦",
+    BROKER: "📈", DEMAT: "📈",
+    MUTUAL_FUND: "💼",
+    CREDIT_CARD: "💳",
+    FIXED_DEPOSIT: "🏦",
+    LOAN: "💰",
+    PPF: "🏛️", NPS: "🏛️",
+  };
+  return icons[type] ?? "💳";
+}
+
+function accountColor(type: string): string {
+  const colors: Record<string, string> = {
+    SAVINGS: "oklch(0.73 0.16 145)", CURRENT: "oklch(0.73 0.16 145)",
+    BROKER: "oklch(0.76 0.16 195)",
+    MUTUAL_FUND: "oklch(0.6 0.12 270)",
+    CREDIT_CARD: "oklch(0.66 0.18 25)",
+    FIXED_DEPOSIT: "oklch(0.76 0.16 65)",
+    LOAN: "oklch(0.66 0.18 25)",
+  };
+  return colors[type] ?? "oklch(0.6 0.12 280)";
+}
+
+function accountTypeName(type: string): string {
+  const names: Record<string, string> = {
+    SAVINGS: "Savings", CURRENT: "Current", SALARY: "Salary",
+    BROKER: "Broker", DEMAT: "Demat",
+    MUTUAL_FUND: "Mutual Fund",
+    CREDIT_CARD: "Credit Card",
+    FIXED_DEPOSIT: "Fixed Deposit",
+    LOAN: "Loan",
+    PPF: "PPF", NPS: "NPS",
+  };
+  return names[type] ?? type;
+}
 
 export default function AccountsPage() {
   const { owner } = useAuth();
-  const { data: accountsList } = useAccounts(owner?.owner_id);
+  const ownerId = owner?.owner_id;
 
-  // If real accounts exist, merge with demo; otherwise show demo
-  const realAccounts = accountsList ?? [];
+  const { data: accountsList, isLoading } = useAccounts(ownerId);
+
+  // Dates computed outside useMemo — cheap string ops; TanStack Query dedupes by value
+  const sevenDaysAgo = (() => {
+    const d = new Date(); d.setDate(d.getDate() - 7); return d.toISOString().slice(0, 10);
+  })();
+  const txnFilters = useMemo(() => ({ date_from: sevenDaysAgo, limit: 300 }), [sevenDaysAgo]);
+  const { data: recentTxns } = useTransactions(ownerId, txnFilters);
+
+  // Build per-account 7-day sparkline anchored to current balance.
+  // Points show what the balance was each day: currentBalance - (net flow from that day onward).
+  const accountSparklines = useMemo(() => {
+    const map = new Map<string, number[]>();
+    if (!recentTxns?.length || !accountsList?.length) return map;
+
+    // Build 7 day date array (oldest first)
+    const days: string[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      days.push(d.toISOString().slice(0, 10));
+    }
+
+    // Group txns by account and date
+    const byAccount = new Map<string, Map<string, number>>();
+    for (const t of recentTxns) {
+      // ISO date strings sort/compare correctly lexicographically
+      const day = t.transaction_date.slice(0, 10);
+      if (!byAccount.has(t.account_id)) byAccount.set(t.account_id, new Map());
+      const dayMap = byAccount.get(t.account_id)!;
+      const delta = t.transaction_type === "CREDIT" ? t.amount_paise : -t.amount_paise;
+      dayMap.set(day, (dayMap.get(day) ?? 0) + delta);
+    }
+
+    // Anchor sparkline to current balance_paise: work backward from today
+    const acctBalances = new Map(accountsList.map((a) => [a.id, a.balance_paise ?? 0]));
+    Array.from(byAccount.entries()).forEach(([acctId, dayMap]) => {
+      const currentBalRupees = (acctBalances.get(acctId) ?? 0) / 100;
+      // Sum of net flow over all 7 days
+      const totalFlow = days.reduce((s, d) => s + (dayMap.get(d) ?? 0), 0) / 100;
+      // startBalance is what the balance was before this 7-day window
+      const startBalance = currentBalRupees - totalFlow;
+      let cumulative = startBalance;
+      const points = days.map((d) => {
+        cumulative += (dayMap.get(d) ?? 0) / 100;
+        return cumulative;
+      });
+      map.set(acctId, points);
+    });
+    return map;
+  }, [recentTxns, accountsList]);
+
+  const accounts = accountsList ?? [];
+  const totalLiquid = accounts
+    .filter((a) => !["LOAN", "CREDIT_CARD"].includes(a.account_type))
+    .reduce((s, a) => s + (a.balance_paise ?? 0), 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <ScreenHeader
         title="Accounts"
-        subtitle={`${DEMO_ACCOUNTS.length} linked accounts · Net liquid ₹6.7L`}
+        subtitle={`${accounts.length} linked account${accounts.length !== 1 ? "s" : ""} · Net liquid ${formatINRShort(totalLiquid)}`}
         actions={
           <ActionBtn color="oklch(0.76 0.16 195)">+ Link Account</ActionBtn>
         }
       />
       <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 80px" }}>
-        {/* Real accounts summary if available */}
-        {realAccounts.length > 0 && (
-          <div style={{ background: "oklch(0.76 0.16 195 / 0.05)", border: "1px solid oklch(0.76 0.16 195 / 0.2)", borderRadius: 10, padding: "10px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--cyan)" }}>✦</span>
-            <span style={{ fontSize: 12, color: "var(--text-2)" }}>
-              {realAccounts.length} account{realAccounts.length > 1 ? "s" : ""} linked via Artha — {realAccounts.map((a) => a.nickname ?? a.institution).join(", ")}
-            </span>
+        {isLoading && (
+          <div style={{ fontSize: 13, color: "var(--text-3)", padding: "20px 0" }}>Loading accounts…</div>
+        )}
+
+        {!isLoading && accounts.length === 0 && (
+          <div style={{ textAlign: "center", padding: "60px 0", color: "var(--text-3)", fontSize: 13 }}>
+            No accounts linked yet. Use the ingestion pipeline to import your statements.
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-          {DEMO_ACCOUNTS.map((a) => (
-            <AccountCard key={a.name} {...a} />
-          ))}
-        </div>
+        {accounts.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+            {accounts.map((a) => {
+              const color = accountColor(a.account_type);
+              const balPaise = a.balance_paise ?? 0;
+              const isCredit = ["LOAN", "CREDIT_CARD"].includes(a.account_type);
+              const sparkData = accountSparklines.get(a.id) ?? [0, 0, 0, 0, 0, 0, 0];
+              const latestTxnDate = recentTxns
+                ?.filter((t) => t.account_id === a.id)
+                .map((t) => t.transaction_date)
+                .sort()
+                .at(-1);
+              const subText = latestTxnDate
+                ? `Last txn ${new Date(latestTxnDate).toLocaleDateString("en-IN", { month: "short", day: "numeric" })}`
+                : a.nickname ?? accountTypeName(a.account_type);
+
+              return (
+                <AccountCard
+                  key={a.id}
+                  icon={accountIcon(a.account_type)}
+                  name={a.nickname ?? a.institution}
+                  num="••••"
+                  bal={`${balPaise < 0 ? "−" : ""}${formatINRShort(Math.abs(balPaise))}`}
+                  sub={subText}
+                  synced={!!latestTxnDate}
+                  data={sparkData}
+                  color={color}
+                  type={accountTypeName(a.account_type)}
+                  credit={isCredit}
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

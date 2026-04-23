@@ -4,7 +4,7 @@ import React, { useMemo, useState } from "react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { RiskArc } from "@/components/charts/RiskArc";
 import { useAuth } from "@/lib/auth";
-import { useAccounts, useProfile, useTransactions } from "@/lib/queries";
+import { useAccounts, useProfile, useTransactions, useHoldings } from "@/lib/queries";
 
 const METRICS = [
   { label: "Beta",          val: "0.88",   desc: "vs Nifty 50",      up: true  },
@@ -13,14 +13,6 @@ const METRICS = [
   { label: "Max Drawdown",  val: "−18.5%", desc: "COVID low",        up: false },
   { label: "Volatility",    val: "22.4%",  desc: "annualised σ",     up: false },
   { label: "Sortino",       val: "1.82",   desc: "downside ratio",   up: true  },
-];
-
-const CONCENTRATION = [
-  { label: "HDFC Group",  pct: 32, color: "oklch(0.76 0.16 195)" },
-  { label: "IT Sector",   pct: 22, color: "oklch(0.73 0.16 145)" },
-  { label: "ZOMATO",      pct: 19, color: "oklch(0.76 0.16 65)"  },
-  { label: "Consumer",    pct: 14, color: "oklch(0.6 0.12 270)"  },
-  { label: "Others",      pct: 13, color: "var(--text-3)"        },
 ];
 
 const STRESS = [
@@ -36,17 +28,30 @@ const APPETITE_META: Record<string, { score: number; label: string; color: strin
   aggressive:   { score: 0.82, label: "Aggressive",     color: "oklch(0.66 0.18 25)"  },
 };
 
+const ASSET_CLASS_COLORS: Record<string, string> = {
+  EQUITY:       "oklch(0.76 0.16 195)",
+  MUTUAL_FUND:  "oklch(0.73 0.16 145)",
+  GOLD:         "oklch(0.82 0.14 80)",
+  REAL_ESTATE:  "oklch(0.6 0.12 270)",
+  FIXED_INCOME: "oklch(0.76 0.16 65)",
+  CASH:         "oklch(0.73 0.16 145)",
+};
+
 export default function RiskPage() {
   const { owner } = useAuth();
-  const { data: prof } = useProfile(owner?.owner_id);
-  const { data: accountsList } = useAccounts(owner?.owner_id);
+  const ownerId = owner?.owner_id;
+  const { data: prof } = useProfile(ownerId);
+  const { data: accountsList } = useAccounts(ownerId);
+  const { data: holdingsData } = useHoldings(ownerId);
 
-  const threeMonthsAgo = useMemo(() => {
+  const threeMonthsAgo = (() => {
     const d = new Date(); d.setMonth(d.getMonth() - 3); return d.toISOString().slice(0, 10);
-  }, []);
-  const { data: recentTxns } = useTransactions(owner?.owner_id, {
-    date_from: threeMonthsAgo, transaction_type: "DEBIT", limit: 500,
-  });
+  })();
+  const txnFilters = useMemo(
+    () => ({ date_from: threeMonthsAgo, transaction_type: "DEBIT" as const, limit: 500 }),
+    [threeMonthsAgo]
+  );
+  const { data: recentTxns } = useTransactions(ownerId, txnFilters);
 
   const riskAppetite = prof?.risk_appetite ?? "moderate";
   const meta = APPETITE_META[riskAppetite] ?? APPETITE_META.moderate;
@@ -70,6 +75,40 @@ export default function RiskPage() {
     return Array.from(types).length;
   }, [accountsList]);
   const divScore = Math.min(accountTypes * 20, 100);
+
+  // F9: Concentration from holdings by asset_class
+  const concentration = useMemo(() => {
+    const holdings = holdingsData ?? [];
+    if (holdings.length === 0) return null;
+
+    const totalPaise = holdings.reduce((s, h) => s + (h.current_value_paise ?? 0), 0);
+    if (totalPaise === 0) return null;
+
+    const byClass = new Map<string, number>();
+    for (const h of holdings) {
+      byClass.set(h.asset_class, (byClass.get(h.asset_class) ?? 0) + (h.current_value_paise ?? 0));
+    }
+    return Array.from(byClass.entries())
+      .sort(([, a], [, b]) => b - a)
+      .map(([cls, val]) => ({
+        label: cls.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()),
+        pct: Math.round((val / totalPaise) * 100),
+        color: ASSET_CLASS_COLORS[cls.toUpperCase()] ?? "var(--text-3)",
+      }));
+  }, [holdingsData]);
+
+  // Fallback static concentration when no holdings data
+  const STATIC_CONCENTRATION = [
+    { label: "HDFC Group",  pct: 32, color: "oklch(0.76 0.16 195)" },
+    { label: "IT Sector",   pct: 22, color: "oklch(0.73 0.16 145)" },
+    { label: "ZOMATO",      pct: 19, color: "oklch(0.76 0.16 65)"  },
+    { label: "Consumer",    pct: 14, color: "oklch(0.6 0.12 270)"  },
+    { label: "Others",      pct: 13, color: "var(--text-3)"        },
+  ];
+
+  const concentrationData = concentration ?? STATIC_CONCENTRATION;
+  const topHolding = concentrationData[0];
+  const isOverweight = topHolding && topHolding.pct > 30;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -111,14 +150,18 @@ export default function RiskPage() {
 
         {/* Concentration + Stress test */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          {/* Concentration */}
+          {/* Concentration (F9) */}
           <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "16px 18px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <span style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600 }}>Concentration Risk</span>
-              <span style={{ fontSize: 10, background: "oklch(0.66 0.18 25 / 0.1)", color: "oklch(0.66 0.18 25)", padding: "2px 8px", borderRadius: 4 }}>⚠ HDFC overweight</span>
+              {isOverweight && (
+                <span style={{ fontSize: 10, background: "oklch(0.66 0.18 25 / 0.1)", color: "oklch(0.66 0.18 25)", padding: "2px 8px", borderRadius: 4 }}>
+                  ⚠ {topHolding.label} overweight
+                </span>
+              )}
             </div>
-            {CONCENTRATION.map((c, i) => (
-              <div key={i} style={{ marginBottom: i < CONCENTRATION.length - 1 ? 10 : 0 }}>
+            {concentrationData.map((c, i) => (
+              <div key={i} style={{ marginBottom: i < concentrationData.length - 1 ? 10 : 0 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                   <span style={{ fontSize: 12, color: "var(--text-2)" }}>{c.label}</span>
                   <span style={{ fontSize: 11, fontFamily: "JetBrains Mono, monospace", color: c.color }}>{c.pct}%</span>
@@ -128,6 +171,11 @@ export default function RiskPage() {
                 </div>
               </div>
             ))}
+            {!concentration && (
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-3)", fontStyle: "italic" }}>
+                Showing placeholder data — ingest holdings to see real concentration
+              </div>
+            )}
           </div>
 
           {/* Stress test */}

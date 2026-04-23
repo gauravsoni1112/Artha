@@ -3,15 +3,8 @@
 import React, { useMemo, useState } from "react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { useAuth } from "@/lib/auth";
-import { useProfile } from "@/lib/queries";
-
-const EVENTS = [
-  { type: "STCG", stock: "ZOMATO",     date: "Mar 12", buy: "₹182",   sell: "₹224",   gain: "+₹58K",  tax: "₹8,700", holding: "8 mo",  up: true  },
-  { type: "STCG", stock: "BAJFINANCE", date: "Feb 28", buy: "₹6,800", sell: "₹7,100", gain: "+₹36K",  tax: "₹5,400", holding: "7 mo",  up: true  },
-  { type: "LTCG", stock: "TCS",        date: "Jan 15", buy: "₹3,200", sell: "₹3,500", gain: "+₹96K",  tax: "₹9,600", holding: "14 mo", up: true  },
-  { type: "LTCG", stock: "HDFCBANK",   date: "Dec 20", buy: "₹1,420", sell: "₹1,580", gain: "+₹38K",  tax: "₹3,840", holding: "18 mo", up: true  },
-  { type: "LOSS", stock: "INFY",       date: "Nov 10", buy: "₹1,580", sell: "₹1,492", gain: "−₹44K",  tax: "Harvest",holding: "4 mo",  up: false },
-];
+import { useProfile, useTaxData } from "@/lib/queries";
+import { formatINRShort } from "@/lib/format";
 
 const OPPS = [
   { icon: "📉", title: "Harvest INFY loss",          saving: "₹6,600",  desc: "₹44K unrealized loss offsets ₹44K of STCG",                color: "oklch(0.66 0.18 25)",  urgent: true  },
@@ -26,18 +19,6 @@ const QUARTERS = [
   { q: "Q4", date: "Mar 15", pct: 100, paid: false },
 ];
 
-function typeColor(t: string) {
-  if (t === "LTCG") return "oklch(0.76 0.16 195)";
-  if (t === "STCG") return "oklch(0.76 0.16 65)";
-  return "oklch(0.66 0.18 25)";
-}
-function typeBg(t: string) {
-  if (t === "LTCG") return "oklch(0.76 0.16 195 / 0.1)";
-  if (t === "STCG") return "oklch(0.76 0.16 65 / 0.1)";
-  return "oklch(0.66 0.18 25 / 0.1)";
-}
-
-// ── New-regime tax helper (FY 2024-25) ───────────────────────
 function calcTax(income: number) {
   const std = 75000;
   const taxable = Math.max(0, income - std);
@@ -60,7 +41,9 @@ function calcTax(income: number) {
 
 export default function TaxPage() {
   const { owner } = useAuth();
-  const { data: profile } = useProfile(owner?.owner_id);
+  const ownerId = owner?.owner_id;
+  const { data: profile } = useProfile(ownerId);
+  const { data: taxRecords, isLoading } = useTaxData(ownerId);
 
   const annualIncome = useMemo(() => {
     if (!profile?.total_monthly_income_paise) return null;
@@ -69,15 +52,33 @@ export default function TaxPage() {
 
   const taxRupees = useMemo(() => annualIncome ? calcTax(Math.floor(annualIncome / 100)) : null, [annualIncome]);
 
-  const totalLiability = taxRupees ? `₹${(taxRupees / 100000).toFixed(1)}L` : "₹1.8Cr";
-  const paidTax = taxRupees ? `₹${(taxRupees * 0.83 / 100000).toFixed(1)}L` : "₹1.5Cr";
-  const balanceDue = taxRupees ? `₹${Math.round(taxRupees * 0.17 / 1000)}K` : "₹30K";
+  // Estimated taxable income from profile (annualIncome paise → rupees − standard deduction ₹75K)
+  const estTaxableIncomePaise = useMemo(() => {
+    if (!annualIncome) return null;
+    const rupees = Math.floor(annualIncome / 100);
+    return Math.max(0, rupees - 75_000) * 100; // back to paise
+  }, [annualIncome]);
+
+  // ~83% of estimated tax paid via advance tax/TDS (rough planning heuristic)
+  const ESTIMATED_TAX_PAID_RATIO = 0.83;
+
+  // KPIs — prefer latest ITR record if available, else estimate from profile
+  const latestITR = taxRecords?.[0];
+  const totalLiability = latestITR?.taxable_income_paise != null
+    ? formatINRShort(latestITR.taxable_income_paise)
+    : estTaxableIncomePaise != null ? formatINRShort(estTaxableIncomePaise) : "—";
+  const paidTax = latestITR?.tax_paid_paise != null
+    ? formatINRShort(latestITR.tax_paid_paise)
+    : taxRupees != null ? formatINRShort(Math.round(taxRupees * ESTIMATED_TAX_PAID_RATIO) * 100) : "—";
+  const tdsPaid = latestITR?.tds_paise != null
+    ? formatINRShort(latestITR.tds_paise)
+    : "—";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <ScreenHeader
         title="Tax Centre"
-        subtitle="FY 2025–26 · New Regime · Slab: 30%"
+        subtitle={latestITR ? `Latest: FY ${latestITR.fiscal_year} · New Regime` : "FY 2025–26 · New Regime · Slab: 30%"}
         actions={<ActionBtn color="oklch(0.76 0.16 65)">Download ITR Summary</ActionBtn>}
       />
 
@@ -85,10 +86,10 @@ export default function TaxPage() {
         {/* KPI strip */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
           {[
-            { label: "Total Liability",   val: totalLiability, color: "oklch(0.76 0.16 65)"  },
-            { label: "Paid (Advance)",    val: paidTax,        color: "oklch(0.73 0.16 145)" },
-            { label: "Balance Due",       val: balanceDue,     color: "oklch(0.66 0.18 25)"  },
-            { label: "Potential Saving",  val: "₹58.2K",       color: "oklch(0.76 0.16 195)" },
+            { label: "Taxable Income",  val: totalLiability, color: "oklch(0.76 0.16 65)"  },
+            { label: "Tax Paid",        val: paidTax,        color: "oklch(0.73 0.16 145)" },
+            { label: "TDS Deducted",    val: tdsPaid,        color: "oklch(0.76 0.16 195)" },
+            { label: "Potential Saving",val: "₹58.2K",       color: "oklch(0.66 0.18 25)"  },
           ].map((k) => (
             <div key={k.label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px" }}>
               <div style={{ fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 6 }}>{k.label}</div>
@@ -133,30 +134,40 @@ export default function TaxPage() {
           </div>
         </div>
 
-        {/* Capital gains table */}
+        {/* ITR Records table (F8) */}
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
-          <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600 }}>Capital Gains Events</div>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid var(--border)" }}>
-                {["Type", "Stock", "Date", "Buy", "Sell", "Gain/Loss", "Tax", "Holding"].map((h) => (
-                  <th key={h} style={{ textAlign: "left", padding: "7px 14px", fontSize: 10, color: "var(--text-3)", fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+          <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600 }}>
+            ITR Records
+          </div>
+          {isLoading ? (
+            <div style={{ padding: "20px 16px", fontSize: 13, color: "var(--text-3)" }}>Loading…</div>
+          ) : !taxRecords?.length ? (
+            <div style={{ padding: "20px 16px", fontSize: 13, color: "var(--text-3)" }}>
+              No ITR records found. Use the static-data/itr endpoint to seed your tax history.
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid var(--border)" }}>
+                  {["Fiscal Year", "Gross Income", "Taxable Income", "Tax Paid", "TDS", "Filed"].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: "7px 14px", fontSize: 10, color: "var(--text-3)", fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {taxRecords.map((r) => (
+                  <ITRRow key={r.id} record={r} />
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {EVENTS.map((e, i) => (
-                <EventRow key={i} {...e} />
-              ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function EventRow({ type, stock, date, buy, sell, gain, tax, holding, up }: typeof EVENTS[0]) {
+function ITRRow({ record }: { record: { id: string; fiscal_year: string; gross_income_paise: number | null; taxable_income_paise: number | null; tax_paid_paise: number | null; tds_paise: number | null; itr_filed: boolean } }) {
   const [hovered, setHovered] = useState(false);
   return (
     <tr
@@ -164,14 +175,28 @@ function EventRow({ type, stock, date, buy, sell, gain, tax, holding, up }: type
       onMouseLeave={() => setHovered(false)}
       style={{ borderBottom: "1px solid var(--border)", background: hovered ? "rgba(255,255,255,0.02)" : "transparent" }}
     >
-      <td style={{ padding: "9px 14px" }}><span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: typeBg(type), color: typeColor(type), fontWeight: 600 }}>{type}</span></td>
-      <td style={{ padding: "9px 14px", fontSize: 13, color: "var(--text)", fontWeight: 500 }}>{stock}</td>
-      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>{date}</td>
-      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>{buy}</td>
-      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>{sell}</td>
-      <td style={{ padding: "9px 14px", fontSize: 12, color: up ? "oklch(0.73 0.16 145)" : "oklch(0.66 0.18 25)", fontFamily: "JetBrains Mono, monospace" }}>{gain}</td>
-      <td style={{ padding: "9px 14px", fontSize: 12, color: type === "LOSS" ? "oklch(0.73 0.16 145)" : "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>{tax}</td>
-      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-3)" }}>{holding}</td>
+      <td style={{ padding: "9px 14px", fontSize: 13, color: "var(--text)", fontWeight: 500, fontFamily: "JetBrains Mono, monospace" }}>{record.fiscal_year}</td>
+      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>
+        {record.gross_income_paise != null ? formatINRShort(record.gross_income_paise) : "—"}
+      </td>
+      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>
+        {record.taxable_income_paise != null ? formatINRShort(record.taxable_income_paise) : "—"}
+      </td>
+      <td style={{ padding: "9px 14px", fontSize: 12, color: "oklch(0.66 0.18 25)", fontFamily: "JetBrains Mono, monospace" }}>
+        {record.tax_paid_paise != null ? formatINRShort(record.tax_paid_paise) : "—"}
+      </td>
+      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text-2)", fontFamily: "JetBrains Mono, monospace" }}>
+        {record.tds_paise != null ? formatINRShort(record.tds_paise) : "—"}
+      </td>
+      <td style={{ padding: "9px 14px" }}>
+        <span style={{
+          fontSize: 10, padding: "2px 7px", borderRadius: 4, fontWeight: 600,
+          background: record.itr_filed ? "oklch(0.73 0.16 145 / 0.1)" : "oklch(0.66 0.18 25 / 0.1)",
+          color: record.itr_filed ? "oklch(0.73 0.16 145)" : "oklch(0.66 0.18 25)",
+        }}>
+          {record.itr_filed ? "✓ Filed" : "Pending"}
+        </span>
+      </td>
     </tr>
   );
 }

@@ -25,6 +25,9 @@ env/
 .idea/
 .DS_Store
 
+# Local planning / task files
+tasks.md
+
 # Local data / storage
 /tmp/
 artha_test*/

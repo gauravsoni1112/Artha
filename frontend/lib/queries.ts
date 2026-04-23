@@ -2,7 +2,7 @@
  * TanStack Query hooks for Artha.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { accounts, admin, goals, ingestion, orchestrator, owners, profile, staticData, transactions } from "@/lib/api";
+import { accounts, admin, goals, holdings, ingestion, netWorth, orchestrator, owners, profile, staticData, taxData, transactions } from "@/lib/api";
 import type { TransactionFilters } from "@/lib/api";
 import type { RecommendationEventRequest, RecommendationRequest } from "@/lib/types";
 
@@ -62,6 +62,42 @@ export function useCurrentMonthTransactions(ownerId: string | undefined) {
   const now = new Date();
   const dateFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
   return useTransactions(ownerId, { date_from: dateFrom, limit: 500 });
+}
+
+// ── Holdings ──────────────────────────────────────────────────────────────────
+
+export function useHoldings(ownerId: string | undefined) {
+  return useQuery({
+    queryKey: ["holdings", ownerId],
+    queryFn: () => holdings.list(ownerId!),
+    enabled: !!ownerId,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+// ── Net Worth ─────────────────────────────────────────────────────────────────
+
+export function useNetWorth(ownerId: string | undefined) {
+  return useQuery({
+    queryKey: ["net-worth", ownerId],
+    queryFn: () => netWorth.get(ownerId!),
+    enabled: !!ownerId,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+// ── Tax Data ──────────────────────────────────────────────────────────────────
+
+export function useTaxData(ownerId: string | undefined) {
+  return useQuery({
+    queryKey: ["tax-data", ownerId],
+    queryFn: () => taxData.list(ownerId!),
+    enabled: !!ownerId,
+    staleTime: 60_000,
+    retry: 1,
+  });
 }
 
 // ── Goal mutations ────────────────────────────────────────────────────────────

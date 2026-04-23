@@ -10,18 +10,18 @@ DELETE /owners/{owner_id}/accounts/{id}     — soft-delete via is_active=False 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_session
-from api.deps import current_owner
-from libs.schemas.db_models import Account, Owner
+from api.deps import check_owner_access, current_owner
+from libs.schemas.db_models import Account, Owner, Transaction
 
 log = structlog.get_logger(__name__)
 
@@ -41,6 +41,7 @@ class AccountOut(BaseModel):
     nickname: str | None
     is_active: bool
     created_at: datetime
+    balance_paise: int | None = None  # None on write endpoints; populated by list
 
     model_config = {"from_attributes": True}
 
@@ -64,12 +65,6 @@ class PatchAccountRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _check_access(requesting_owner: Owner, target_owner_id: uuid.UUID) -> None:
-    """Allow if caller is admin OR is accessing their own accounts."""
-    if not requesting_owner.is_admin and requesting_owner.id != target_owner_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
-
 def _hash_account_number(account_number: str) -> str:
     import hashlib
     return hashlib.sha256(account_number.encode()).hexdigest()
@@ -87,13 +82,44 @@ async def list_accounts(
     session: AsyncSession = Depends(get_session),
     include_inactive: bool = False,
 ) -> list[AccountOut]:
-    _check_access(requesting_owner, owner_id)
+    check_owner_access(requesting_owner, owner_id)
     q = select(Account).where(Account.owner_id == owner_id)
     if not include_inactive:
         q = q.where(Account.is_active.is_(True))
     q = q.order_by(Account.institution, Account.account_type)
     result = await session.execute(q)
-    return result.scalars().all()
+    accounts = result.scalars().all()
+
+    if not accounts:
+        return []
+
+    account_ids = [a.id for a in accounts]
+    credit_sum = func.coalesce(
+        func.sum(case((Transaction.transaction_type == "CREDIT", Transaction.amount_paise), else_=0)), 0
+    )
+    debit_sum = func.coalesce(
+        func.sum(case((Transaction.transaction_type == "DEBIT", Transaction.amount_paise), else_=0)), 0
+    )
+    bal_result = await session.execute(
+        select(Transaction.account_id, (credit_sum - debit_sum).label("balance_paise"))
+        .where(Transaction.account_id.in_(account_ids))
+        .group_by(Transaction.account_id)
+    )
+    balances: dict[uuid.UUID, int] = {row.account_id: row.balance_paise for row in bal_result}
+
+    return [
+        AccountOut(
+            id=a.id,
+            owner_id=a.owner_id,
+            account_type=a.account_type,
+            institution=a.institution,
+            nickname=a.nickname,
+            is_active=a.is_active,
+            created_at=a.created_at,
+            balance_paise=balances.get(a.id, 0),
+        )
+        for a in accounts
+    ]
 
 
 @router.post("", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
@@ -103,7 +129,7 @@ async def create_account(
     requesting_owner: Annotated[Owner, Depends(current_owner)],
     session: AsyncSession = Depends(get_session),
 ) -> AccountOut:
-    _check_access(requesting_owner, owner_id)
+    check_owner_access(requesting_owner, owner_id)
 
     account = Account(
         owner_id=owner_id,
@@ -127,7 +153,7 @@ async def patch_account(
     requesting_owner: Annotated[Owner, Depends(current_owner)],
     session: AsyncSession = Depends(get_session),
 ) -> AccountOut:
-    _check_access(requesting_owner, owner_id)
+    check_owner_access(requesting_owner, owner_id)
 
     result = await session.execute(
         select(Account).where(Account.id == account_id, Account.owner_id == owner_id)
@@ -157,7 +183,7 @@ async def deactivate_account(
     requesting_owner: Annotated[Owner, Depends(current_owner)],
     session: AsyncSession = Depends(get_session),
 ) -> None:
-    _check_access(requesting_owner, owner_id)
+    check_owner_access(requesting_owner, owner_id)
 
     result = await session.execute(
         select(Account).where(Account.id == account_id, Account.owner_id == owner_id)
