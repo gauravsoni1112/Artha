@@ -10,9 +10,11 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { useAuth } from "@/lib/auth";
-import { useCreateGoal, useDeactivateGoal, useGoals, usePatchGoal } from "@/lib/queries";
+import { useCreateGoal, useDeactivateGoal, useMultiOwnerGoals, usePatchGoal } from "@/lib/queries";
 import { formatDate, formatINRShort } from "@/lib/format";
 import type { FinancialGoal } from "@/lib/types";
+import { useOwnerIds, useTimeRange, useViewMode } from "@/lib/viewmode";
+import { TimeRangeTabs } from "@/components/layout/TimeRangeTabs";
 
 // ── Category helpers ──────────────────────────────────────────
 const CATEGORY_ICONS: Record<string, string> = {
@@ -70,7 +72,7 @@ function GoalDialog({ ownerId, editGoal, onClose }: { ownerId: string; editGoal?
     const cp = parseInt(form.current_rupees || "0", 10) * 100;
     const payload = { goal_name: form.goal_name.trim(), target_amount_paise: tp, current_amount_paise: isNaN(cp) ? 0 : cp, target_date: form.target_date || undefined, category: form.category || undefined };
     try {
-      editGoal ? await patchMut.mutateAsync({ goalId: editGoal.id, data: payload }) : await createMut.mutateAsync(payload);
+      if (editGoal) { await patchMut.mutateAsync({ goalId: editGoal.id, data: payload }); } else { await createMut.mutateAsync(payload); }
       onClose();
     } catch (err) { setError(err instanceof Error ? err.message : "Failed to save goal"); }
   }
@@ -198,7 +200,11 @@ function GoalCard({ goal, ownerId }: { goal: FinancialGoal; ownerId: string }) {
 // ── Page ──────────────────────────────────────────────────────
 export default function GoalsPage() {
   const { owner } = useAuth();
-  const { data: goalsList, isLoading } = useGoals(owner?.owner_id);
+  const { isFamily } = useViewMode();
+  const ownerIds = useOwnerIds();
+  useTimeRange(); // subscribe so TimeRangeTabs reflects global state
+
+  const { data: goalsList, isLoading } = useMultiOwnerGoals(ownerIds);
   const [createOpen, setCreateOpen] = useState(false);
 
   const activeGoals = goalsList?.filter((g) => g.is_active) ?? [];
@@ -208,21 +214,24 @@ export default function GoalsPage() {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <ScreenHeader
         title="Goals"
-        subtitle={`${activeGoals.length} active · ${onTrack} on track`}
+        subtitle={`${activeGoals.length} active · ${onTrack} on track${isFamily ? " · Family" : ""}`}
+        tabs={<TimeRangeTabs />}
         actions={
-          <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-            <DialogTrigger asChild>
-              <button
-                style={{ padding: "6px 14px", background: "oklch(0.76 0.16 65 / 0.1)", border: "1px solid oklch(0.76 0.16 65 / 0.3)", borderRadius: 8, color: "oklch(0.76 0.16 65)", fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}
-              >
-                <Plus size={13} />New Goal
-              </button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader><DialogTitle>New goal</DialogTitle><DialogDescription>Create a new financial goal</DialogDescription></DialogHeader>
-              <GoalDialog ownerId={owner?.owner_id ?? ""} onClose={() => setCreateOpen(false)} />
-            </DialogContent>
-          </Dialog>
+          !isFamily && (
+            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+              <DialogTrigger asChild>
+                <button
+                  style={{ padding: "6px 14px", background: "oklch(0.76 0.16 65 / 0.1)", border: "1px solid oklch(0.76 0.16 65 / 0.3)", borderRadius: 8, color: "oklch(0.76 0.16 65)", fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}
+                >
+                  <Plus size={13} />New Goal
+                </button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader><DialogTitle>New goal</DialogTitle><DialogDescription>Create a new financial goal</DialogDescription></DialogHeader>
+                <GoalDialog ownerId={owner?.owner_id ?? ""} onClose={() => setCreateOpen(false)} />
+              </DialogContent>
+            </Dialog>
+          )
         }
       />
 
@@ -242,7 +251,7 @@ export default function GoalsPage() {
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14 }}>
             {activeGoals.map((g) => (
-              <GoalCard key={g.id} goal={g} ownerId={owner?.owner_id ?? ""} />
+              <GoalCard key={g.id} goal={g} ownerId={g.owner_id} />
             ))}
           </div>
         )}

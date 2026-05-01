@@ -81,7 +81,9 @@
       "Bash(brew install *)",
       "Bash(.venv/bin/python3 *)",
       "Bash(node -e ' *)",
-      "Skill(docker)"
+      "Skill(docker)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(psql *)"
     ]
   },
   "enabledPlugins": {}

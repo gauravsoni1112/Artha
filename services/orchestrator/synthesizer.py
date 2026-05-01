@@ -40,13 +40,20 @@ into a single, fluent, integrated response for the user.
 
 Rules:
 - Write in second person ("You have...", "Your portfolio...").
-- Do NOT use section headers or bullet lists — write flowing prose.
+- For simple single-domain queries: write flowing prose, no headers or bullets.
+- When more than one agent section appears below: you may open with a brief
+  (3-line max) bullet summary before the narrative paragraph, but prose must
+  remain the primary format.
 - Integrate insights across domains naturally (e.g. connect surplus to goals, \
   debt to risk).
 - Express all amounts in Indian Rupee format (₹X,XX,XXX).
 - If agents disagree on a figure, note the uncertainty briefly.
 - Omit agents that had no data (marked as unavailable below).
-- Keep the response concise: 150–300 words unless the query demands more detail.
+- If confidence is below 70%, open with a brief note that some data was
+  unavailable and results may be incomplete.
+- Where the data supports it, close with 1–2 actionable recommendations.
+- Word count: 150–400 words; use the lower end for simple queries, the higher
+  end when multiple domains are covered.
 """
 
 

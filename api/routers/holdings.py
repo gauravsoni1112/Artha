@@ -22,11 +22,24 @@ from libs.schemas.db_models import Holding, Owner
 router = APIRouter(prefix="/owners/{owner_id}/holdings", tags=["holdings"])
 
 
+class HoldingCreate(BaseModel):
+    asset_class: str
+    instrument_name: str
+    isin: str | None = None
+    units: float | None = None
+    nav_paise: int | None = None
+    purchase_price_paise: int | None = None
+    current_value_paise: int | None = None
+    valuation_date: date | None = None
+    metadata: dict | None = None
+
+
 class HoldingOut(BaseModel):
     id: uuid.UUID
     account_id: uuid.UUID | None
     asset_class: str
     instrument_name: str
+    isin: str | None
     units: float | None
     nav_paise: int | None
     purchase_price_paise: int | None
@@ -37,6 +50,7 @@ class HoldingOut(BaseModel):
     pl_pct: float | None           # pl_paise / purchase_price_paise * 100
     xirr: float | None = None      # no price history table yet
     day_change_pct: float | None = None  # no price history table yet
+    metadata: dict | None = None
 
 
 def _to_out(h: Holding) -> HoldingOut:
@@ -58,6 +72,7 @@ def _to_out(h: Holding) -> HoldingOut:
         account_id=h.account_id,
         asset_class=h.asset_class,
         instrument_name=h.instrument_name,
+        isin=h.isin,
         units=units,
         nav_paise=h.nav_paise,
         purchase_price_paise=h.purchase_price_paise,
@@ -66,7 +81,34 @@ def _to_out(h: Holding) -> HoldingOut:
         avg_cost_paise=avg_cost,
         pl_paise=pl_paise,
         pl_pct=pl_pct,
+        metadata=h.metadata_,
     )
+
+
+@router.post("", response_model=HoldingOut, status_code=201)
+async def create_holding(
+    owner_id: uuid.UUID,
+    body: HoldingCreate,
+    requesting_owner: Annotated[Owner, Depends(current_owner)],
+    session: AsyncSession = Depends(get_session),
+) -> HoldingOut:
+    check_owner_access(requesting_owner, owner_id)
+    holding = Holding(
+        owner_id=owner_id,
+        asset_class=body.asset_class,
+        instrument_name=body.instrument_name,
+        isin=body.isin,
+        units=body.units,
+        nav_paise=body.nav_paise,
+        purchase_price_paise=body.purchase_price_paise,
+        current_value_paise=body.current_value_paise,
+        valuation_date=body.valuation_date,
+        metadata_=body.metadata,
+    )
+    session.add(holding)
+    await session.commit()
+    await session.refresh(holding)
+    return _to_out(holding)
 
 
 @router.get("", response_model=list[HoldingOut])

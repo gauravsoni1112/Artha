@@ -372,8 +372,22 @@ export const staticData = {
 // Holdings
 // ---------------------------------------------------------------------------
 
+export interface CreateHoldingBody {
+  asset_class: string;
+  instrument_name: string;
+  isin?: string | null;
+  units?: number | null;
+  nav_paise?: number | null;
+  purchase_price_paise?: number | null;
+  current_value_paise?: number | null;
+  valuation_date?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
 export const holdings = {
   list: (ownerId: string) => request<Holding[]>(`/owners/${ownerId}/holdings`),
+  create: (ownerId: string, body: CreateHoldingBody) =>
+    request<Holding>(`/owners/${ownerId}/holdings`, { method: "POST", body: JSON.stringify(body) }),
 };
 
 // ---------------------------------------------------------------------------

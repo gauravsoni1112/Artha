@@ -8,10 +8,11 @@ interface ScreenHeaderProps {
   subtitle?: string;
   live?: boolean;
   onBack?: () => void;
+  tabs?: React.ReactNode;
   actions?: React.ReactNode;
 }
 
-export function ScreenHeader({ title, subtitle, live, onBack, actions }: ScreenHeaderProps) {
+export function ScreenHeader({ title, subtitle, live, onBack, tabs, actions }: ScreenHeaderProps) {
   const router = useRouter();
   const handleBack = onBack ?? (() => router.push("/"));
   const [btnHovered, setBtnHovered] = useState(false);
@@ -82,7 +83,12 @@ export function ScreenHeader({ title, subtitle, live, onBack, actions }: ScreenH
           </div>
         )}
       </div>
-      {actions}
+      {(tabs || actions) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
+          {tabs}
+          {actions}
+        </div>
+      )}
     </div>
   );
 }

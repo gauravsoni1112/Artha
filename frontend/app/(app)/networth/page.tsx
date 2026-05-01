@@ -4,9 +4,10 @@ import React, { useMemo, useState } from "react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
-import { useAuth } from "@/lib/auth";
-import { useNetWorth } from "@/lib/queries";
+import { useMultiOwnerNetWorth } from "@/lib/queries";
+import { TimeRangeTabs } from "@/components/layout/TimeRangeTabs";
 import { formatINRShort } from "@/lib/format";
+import { getTimeRangeCutoffMonth, useOwnerIds, useTimeRange } from "@/lib/viewmode";
 
 const ASSET_COLORS = [
   "oklch(0.76 0.16 195)",
@@ -17,13 +18,10 @@ const ASSET_COLORS = [
   "oklch(0.66 0.18 25)",
 ];
 
-const RANGES = ["3M", "6M", "FY", "All"] as const;
-
 export default function NetWorthPage() {
-  const { owner } = useAuth();
-  const ownerId = owner?.owner_id;
-  const { data: nwData, isLoading } = useNetWorth(ownerId);
-  const [range, setRange] = useState<string>("FY");
+  const ownerIds = useOwnerIds();
+  const { timeRange } = useTimeRange();
+  const { data: nwData, isLoading } = useMultiOwnerNetWorth(ownerIds);
 
   const fullHistory = nwData?.history ?? [];
   const assets = (nwData?.assets_by_category ?? []).map((a, i) => ({
@@ -31,15 +29,12 @@ export default function NetWorthPage() {
     color: ASSET_COLORS[i % ASSET_COLORS.length],
   }));
 
-  // Filter history by range selector
+  // Filter history by the global time range
   const history = useMemo(() => {
-    const monthsBack = range === "3M" ? 3 : range === "6M" ? 6 : range === "FY" ? 12 : Infinity;
-    if (!isFinite(monthsBack)) return fullHistory;
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - monthsBack);
-    const cutoffStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}`;
-    return fullHistory.filter((h) => h.month >= cutoffStr);
-  }, [fullHistory, range]);
+    const cutoffMonth = getTimeRangeCutoffMonth(timeRange);
+    if (!cutoffMonth) return fullHistory;
+    return fullHistory.filter((h) => h.month >= cutoffMonth);
+  }, [fullHistory, timeRange]);
 
   // Sparkline data — normalize to relative units for display
   const sparkData = useMemo(() => {
@@ -89,21 +84,7 @@ export default function NetWorthPage() {
         title="Net Worth"
         subtitle="Total assets minus liabilities · Live"
         live
-        actions={
-          <div style={{ display: "flex", gap: 2, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 3 }}>
-            {RANGES.map((r) => (
-              <button key={r} onClick={() => setRange(r)}
-                style={{
-                  padding: "3px 10px", borderRadius: 5,
-                  border: r === range ? "1px solid var(--border-bright)" : "none",
-                  background: r === range ? "var(--bg3)" : "none",
-                  color: r === range ? "oklch(0.76 0.16 195)" : "var(--text-2)",
-                  fontSize: 12, cursor: "pointer", fontFamily: "inherit",
-                }}
-              >{r}</button>
-            ))}
-          </div>
-        }
+        tabs={<TimeRangeTabs />}
       />
 
       <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 80px" }}>

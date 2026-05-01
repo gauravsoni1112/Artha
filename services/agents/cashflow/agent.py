@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from langchain_core.tools import StructuredTool
 
+from libs.schemas.user_profile import UserProfile
 from services.agent.tools.registry import (
     BudgetComparisonInput,
     CategoryAnalysisInput,
@@ -55,6 +56,22 @@ class CashflowAgent(BaseAgent):
 
     AGENT_ID = "cashflow_agent"
     CAPABILITIES = ["cashflow", "spending", "budget", "accounts"]
+
+    def _system_prompt(self, user_profile: UserProfile) -> str:
+        base = super()._system_prompt(user_profile)
+        return base + (
+            "\n\nTool selection guide:\n"
+            "- fetch_accounts: List accounts with balances. Call first if the user mentions a "
+            "specific account by name.\n"
+            "- transaction_query: Fetch individual transactions. Use when the user wants to see "
+            "a LIST of specific entries, or when filtering by a single account.\n"
+            "- category_analysis: Aggregate spending by category. Prefer over transaction_query "
+            "when the user asks 'how much did I spend on X' or wants a category breakdown.\n"
+            "- spending_trend: Month-by-month trend. Use when the user asks 'is my spending "
+            "going up?' or wants a comparison across months.\n"
+            "- budget_comparison: Actual vs budget. Use when the user asks about budgets.\n"
+            "- upcoming_expenses: Predicted recurring bills. Use for 'what bills are coming?'."
+        )
 
     def _build_tools(self, owner_id: str) -> list[StructuredTool]:
         return [

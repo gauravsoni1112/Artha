@@ -1,14 +1,21 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { RiskArc } from "@/components/charts/RiskArc";
-import { useGoals, useAccounts, useTransactions, useNetWorth, useHoldings } from "@/lib/queries";
+import { TimeRangeTabs } from "@/components/layout/TimeRangeTabs";
+import {
+  useMultiOwnerAccounts,
+  useMultiOwnerGoals,
+  useMultiOwnerHoldings,
+  useMultiOwnerNetWorth,
+  useMultiOwnerTransactions,
+} from "@/lib/queries";
 import { formatINRShort } from "@/lib/format";
-import type { ViewMode } from "@/components/layout/Sidebar";
+import { getTimeRangeDates, useOwnerIds, useTimeRange, useViewMode } from "@/lib/viewmode";
 
 const ALL_INSIGHTS = [
   { id: 1, type: "amber", label: "Tax Opportunity", bold: "₹32K unrealized loss", rest: " in INFY offsets ₹58K STCG. Harvest before Mar 31.", cta: "View holdings →", route: "/tax" },
@@ -167,38 +174,23 @@ function QuickBtn({ children, onClick }: { children: React.ReactNode; onClick?: 
 export default function DashboardPage() {
   const router = useRouter();
   const { owner } = useAuth();
-  const [timeRange, setTimeRange] = useState("FY");
+  const { timeRange } = useTimeRange();
   const [dismissed, setDismissed] = useState<number[]>([]);
-  const [viewMode, setViewMode] = useState<ViewMode>("individual");
-
-  useEffect(() => {
-    const stored = localStorage.getItem("artha-view") as ViewMode | null;
-    if (stored === "individual" || stored === "family") setViewMode(stored);
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as ViewMode;
-      if (detail === "individual" || detail === "family") setViewMode(detail);
-    };
-    window.addEventListener("artha-view-change", handler);
-    return () => window.removeEventListener("artha-view-change", handler);
-  }, []);
-
-  const ownerId = owner?.owner_id;
-  const isFamily = viewMode === "family";
+  const { isFamily } = useViewMode();
   const firstName = owner?.name?.split(" ")[0] ?? "there";
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
-  // ── Data hooks ────────────────────────────────────────────────
-  const { data: goalsData } = useGoals(ownerId);
-  const { data: accountsList } = useAccounts(ownerId);
-  const { data: netWorthData } = useNetWorth(ownerId);
-  const { data: holdingsData } = useHoldings(ownerId);
+  const ownerIds = useOwnerIds();
 
-  const sevenMonthsAgo = (() => {
-    const d = new Date(); d.setMonth(d.getMonth() - 7); return d.toISOString().slice(0, 10);
-  })();
-  const txnFilters = useMemo(() => ({ date_from: sevenMonthsAgo, limit: 500 }), [sevenMonthsAgo]);
-  const { data: txns } = useTransactions(ownerId, txnFilters);
+  // ── Data hooks ────────────────────────────────────────────────
+  const { data: goalsData } = useMultiOwnerGoals(ownerIds);
+  const { data: accountsList } = useMultiOwnerAccounts(ownerIds);
+  const { data: netWorthData } = useMultiOwnerNetWorth(ownerIds);
+  const { data: holdingsData } = useMultiOwnerHoldings(ownerIds);
+
+  const txnFilters = useMemo(() => ({ ...getTimeRangeDates(timeRange), limit: 500 }), [timeRange]);
+  const { data: txns } = useMultiOwnerTransactions(ownerIds, txnFilters);
 
   // ── Goals (F1) ────────────────────────────────────────────────
   const activeGoals = useMemo(() => (goalsData ?? []).filter((g) => g.is_active), [goalsData]);
@@ -329,19 +321,7 @@ export default function DashboardPage() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ display: "flex", gap: 2, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 3 }}>
-            {["1M", "3M", "FY", "All"].map((r) => (
-              <button key={r} onClick={() => setTimeRange(r)}
-                style={{
-                  padding: "4px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
-                  cursor: "pointer", transition: "all 0.15s", fontFamily: "inherit",
-                  border: timeRange === r ? "1px solid var(--border-bright)" : "1px solid transparent",
-                  background: timeRange === r ? "var(--bg3)" : "none",
-                  color: timeRange === r ? "var(--cyan)" : "var(--text-2)",
-                }}
-              >{r}</button>
-            ))}
-          </div>
+          <TimeRangeTabs />
           <TopIconBtn title="Upload statement">↑</TopIconBtn>
           <TopIconBtn title="Notifications" dot>🔔</TopIconBtn>
         </div>

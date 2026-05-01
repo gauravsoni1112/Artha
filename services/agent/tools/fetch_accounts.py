@@ -34,16 +34,23 @@ async def run(
     - Identify which account to query for transactions
 
     Returns: Account ID, type, institution, nickname, active status, and transaction count.
-    Optionally filter by account_type: BANK, CREDIT_CARD, INVESTMENT, etc.
+    Optionally filter by account_type: SAVINGS, CHECKING, CREDIT_CARD, DEMAT, MF_FOLIO, PPF, NPS, FD, OTHER.
+    Pass INVESTMENT to fetch all investment-type accounts (DEMAT, MF_FOLIO, PPF, NPS, FD combined).
     """
     log.info("tool.fetch_accounts.start", owner_id=owner_id, account_type=account_type)
+
+    _INVESTMENT_TYPES = {"DEMAT", "MF_FOLIO", "PPF", "NPS", "FD"}
 
     with start_span("tool.fetch_accounts", {"owner_id": owner_id}):
         owner_uuid = uuid.UUID(owner_id)
 
         stmt = select(Account).where(Account.owner_id == owner_uuid)
         if account_type:
-            stmt = stmt.where(Account.account_type == account_type.upper())
+            normalized = account_type.upper()
+            if normalized == "INVESTMENT":
+                stmt = stmt.where(Account.account_type.in_(_INVESTMENT_TYPES))
+            else:
+                stmt = stmt.where(Account.account_type == normalized)
 
         stmt = stmt.order_by(Account.created_at.desc())
 

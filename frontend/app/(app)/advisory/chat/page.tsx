@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Trash2 } from "lucide-react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
@@ -21,6 +21,7 @@ const SUGGESTION_PROMPTS = [
 ];
 
 function extractContent(response: import("@/lib/types").RecommendationResponse): string {
+  if (response.synthesized_answer?.trim()) return response.synthesized_answer.trim();
   const outputs = response.agent_outputs_json ?? [];
   const answers = outputs
     .filter((ao) => !ao.error && ao.response?.result)
@@ -32,9 +33,9 @@ function extractContent(response: import("@/lib/types").RecommendationResponse):
   return answers.join("\n\n") || "Analysis complete — see reasoning trace for details.";
 }
 
-export default function ChatPage() {
+function ChatPageInner() {
   const { owner } = useAuth();
-  const { messages, addMessage, updateMessage, clearThread, hydrated } = useChatThread();
+  const { messages, addMessage, updateMessage, clearThread, hydrated } = useChatThread(owner?.owner_id);
   const [input, setInput] = useState("");
   const mutation = useAskArtha();
   const searchParams = useSearchParams();
@@ -109,6 +110,7 @@ export default function ChatPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+
       <ScreenHeader
         title="Ask Artha"
         subtitle="Multi-agent financial advisor"
@@ -169,6 +171,14 @@ export default function ChatPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense>
+      <ChatPageInner />
+    </Suspense>
   );
 }
 

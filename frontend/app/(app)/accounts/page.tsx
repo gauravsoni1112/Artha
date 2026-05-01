@@ -2,10 +2,11 @@
 
 import React, { useMemo, useState } from "react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
+import { TimeRangeTabs } from "@/components/layout/TimeRangeTabs";
 import { Sparkline } from "@/components/charts/Sparkline";
-import { useAuth } from "@/lib/auth";
-import { useAccounts, useTransactions } from "@/lib/queries";
+import { useMultiOwnerAccounts, useMultiOwnerTransactions } from "@/lib/queries";
 import { formatINRShort } from "@/lib/format";
+import { getTimeRangeDates, useOwnerIds, useTimeRange } from "@/lib/viewmode";
 
 function accountIcon(type: string): string {
   const icons: Record<string, string> = {
@@ -46,17 +47,13 @@ function accountTypeName(type: string): string {
 }
 
 export default function AccountsPage() {
-  const { owner } = useAuth();
-  const ownerId = owner?.owner_id;
+  const ownerIds = useOwnerIds();
+  const { timeRange } = useTimeRange();
 
-  const { data: accountsList, isLoading } = useAccounts(ownerId);
+  const { data: accountsList, isLoading } = useMultiOwnerAccounts(ownerIds);
 
-  // Dates computed outside useMemo — cheap string ops; TanStack Query dedupes by value
-  const sevenDaysAgo = (() => {
-    const d = new Date(); d.setDate(d.getDate() - 7); return d.toISOString().slice(0, 10);
-  })();
-  const txnFilters = useMemo(() => ({ date_from: sevenDaysAgo, limit: 300 }), [sevenDaysAgo]);
-  const { data: recentTxns } = useTransactions(ownerId, txnFilters);
+  const txnFilters = useMemo(() => ({ ...getTimeRangeDates(timeRange), limit: 300 }), [timeRange]);
+  const { data: recentTxns } = useMultiOwnerTransactions(ownerIds, txnFilters);
 
   // Build per-account 7-day sparkline anchored to current balance.
   // Points show what the balance was each day: currentBalance - (net flow from that day onward).
@@ -110,9 +107,8 @@ export default function AccountsPage() {
       <ScreenHeader
         title="Accounts"
         subtitle={`${accounts.length} linked account${accounts.length !== 1 ? "s" : ""} · Net liquid ${formatINRShort(totalLiquid)}`}
-        actions={
-          <ActionBtn color="oklch(0.76 0.16 195)">+ Link Account</ActionBtn>
-        }
+        tabs={<TimeRangeTabs />}
+        actions={<ActionBtn color="oklch(0.76 0.16 195)">+ Link Account</ActionBtn>}
       />
       <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 80px" }}>
         {isLoading && (

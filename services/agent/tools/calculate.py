@@ -37,9 +37,10 @@ async def run_convert(
     from_unit: str,
     to_unit: str,
 ) -> ToolResult:
-    """
-    Convert an INR amount between denominations (paise / rupee / lakh / crore).
+    """Convert an INR amount between denominations (paise / rupee / lakh / crore).
+
     Always returns result_paise (int) so downstream tools can use it directly.
+    Use this tool instead of computing conversions inline — LLM arithmetic is unreliable.
     """
     from_unit = from_unit.lower().strip()
     to_unit = to_unit.lower().strip()
@@ -94,9 +95,10 @@ async def run_percentage(
     base_paise: int,
     percent: float,
 ) -> ToolResult:
-    """
-    Compute *percent*% of *base_paise*. Result rounded to nearest paise.
+    """Compute *percent*% of *base_paise*. Result rounded to nearest paise.
+
     Example: 15% of ₹2,00,000 (20000000 paise) → 3000000 paise (₹30,000).
+    Use this tool instead of computing percentages inline — LLM arithmetic is unreliable.
     """
     result_paise = int(
         (Decimal(str(base_paise)) * Decimal(str(percent)) / Decimal("100"))
@@ -122,9 +124,10 @@ async def run_growth(
     from_paise: int,
     to_paise: int,
 ) -> ToolResult:
-    """
-    Compute absolute and percentage change from *from_paise* to *to_paise*.
+    """Compute absolute and percentage change from *from_paise* to *to_paise*.
+
     Returns direction: "up", "down", or "flat".
+    Use this tool instead of computing growth rates inline — LLM arithmetic is unreliable.
     """
     delta = to_paise - from_paise
     warnings: list[str] = []
@@ -162,10 +165,11 @@ async def run_compound_interest(
     years: float,
     compounding_frequency: int = 12,
 ) -> ToolResult:
-    """
-    Compound interest on a lump sum (FD / investment projection).
+    """Compound interest on a lump sum (FD / investment projection).
+
     Formula: A = P × (1 + r/n)^(n×t).
     compounding_frequency: 1=annual, 2=semi-annual, 4=quarterly, 12=monthly, 365=daily.
+    Use this tool instead of computing compound interest inline — LLM arithmetic is unreliable.
     """
     if compounding_frequency <= 0:
         return ToolResult(

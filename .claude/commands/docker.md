@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(docker compose:*), Read(./infra/**)
-argument-hint: up [services...] | down | ps | logs [service]
+argument-hint: up [services...] | down | build | rebuild | ps | logs [service]
 description: Manage the Artha Docker Compose stack
 ---
 
@@ -16,6 +16,20 @@ Interpret the first argument as the action:
 - `down`
   Run:
   `docker compose -f infra/docker-compose.yml down`
+
+- `build`
+  Build images without starting containers.
+  Run:
+  `docker compose -f infra/docker-compose.yml build`
+  If service names are provided, append them.
+
+- `rebuild`
+  Full clean rebuild sequence — stops containers, rebuilds all images from scratch (no cache), then starts containers.
+  Run in order:
+  1. `docker compose -f infra/docker-compose.yml down`
+  2. `docker compose -f infra/docker-compose.yml build --no-cache`
+  3. `docker compose -f infra/docker-compose.yml up -d`
+  If service names are provided, pass them to steps 2 and 3.
 
 - `ps`
   Run:
@@ -37,7 +51,11 @@ Behavior rules:
 Examples:
 
 - `/docker up`
-- `/docker up api cashflow_agent investment_agent tax_agent risk_agent goal_agent`
+- `/docker up api cashflow_agent`
+- `/docker build`
+- `/docker build api frontend`
+- `/docker rebuild`
+- `/docker rebuild api`
+- `/docker down`
 - `/docker ps`
 - `/docker logs risk_agent`
-- `/docker down`

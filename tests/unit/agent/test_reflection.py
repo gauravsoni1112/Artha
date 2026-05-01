@@ -53,7 +53,7 @@ def test_parse_valid_high_confidence():
     assert result.needs_rerun is False
 
 
-def test_parse_valid_low_confidence_triggers_rerun():
+def test_parse_valid_low_confidence():
     node = _make_node()
     payload = json.dumps({
         "confidence_score": 0.4,
@@ -62,7 +62,9 @@ def test_parse_valid_low_confidence_triggers_rerun():
     })
     result = node._parse(payload)
     assert result.confidence_score == 0.4
-    assert result.needs_rerun is True
+    assert result.is_complete is False
+    # needs_rerun is set by acall(), not _parse()
+    assert result.needs_rerun is False
 
 
 def test_parse_clamps_score_above_1():
@@ -169,6 +171,31 @@ async def test_acall_low_confidence_triggers_rerun():
 
 
 @pytest.mark.asyncio
+async def test_acall_below_threshold_but_complete_triggers_rerun():
+    """Score below REFLECTION_THRESHOLD should trigger rerun even if is_complete=True."""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = json.dumps({
+        "confidence_score": 0.4,
+        "is_complete": True,  # LLM says complete but score is well below threshold
+        "reflection_notes": "Answer present but time range not confirmed.",
+    })
+    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+
+    node = ReflectionNode(llm=mock_llm)
+    state = {
+        "messages": [
+            _human_msg("What did I spend last month?"),
+            _ai_msg("You spent some amount on various categories."),
+        ],
+        "reflect_count": 0,
+    }
+    result = await node.acall(state)
+    assert result["needs_rerun"] is True
+    assert result["reflect_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_acall_max_iterations_stops_rerun():
     """After MAX_REFLECT_ITERATIONS, needs_rerun is always False."""
     mock_llm = MagicMock()
@@ -202,8 +229,8 @@ async def test_acall_empty_messages_uses_fallback():
 
 
 @pytest.mark.asyncio
-async def test_acall_strips_owner_id_from_question():
-    """owner_id token is stripped before sending question to reflection LLM."""
+async def test_acall_uses_first_human_message_as_question():
+    """The first HumanMessage (plain user query) is used verbatim as the question."""
     captured_prompts = []
 
     async def mock_ainvoke(prompts, **kwargs):
@@ -218,14 +245,12 @@ async def test_acall_strips_owner_id_from_question():
     node = ReflectionNode(llm=mock_llm)
     state = {
         "messages": [
-            _human_msg("[owner_id=abc123] What is my balance?"),
+            _human_msg("What is my balance?"),
             _ai_msg("Your balance is ₹10,000."),
         ],
         "reflect_count": 0,
     }
     await node.acall(state)
 
-    # The human message sent to the reflection LLM should NOT contain owner_id
     human_content = captured_prompts[1].content
-    assert "owner_id" not in human_content
     assert "What is my balance?" in human_content
