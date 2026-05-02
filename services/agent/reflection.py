@@ -64,7 +64,7 @@ _REFLECTION_SYSTEM = """\
 You are a financial answer quality evaluator.
 
 Given a user question and the assistant's draft answer, rate how complete and
-accurate the answer is.  Output ONLY valid JSON (no markdown, no explanation):
+accurate the answer is. Output ONLY valid JSON (no markdown, no explanation):
 
 {
   "confidence_score": <float between 0.0 and 1.0>,
@@ -72,14 +72,21 @@ accurate the answer is.  Output ONLY valid JSON (no markdown, no explanation):
   "reflection_notes": "<brief note — what is missing or uncertain, or 'Answer is complete.' if nothing>"
 }
 
+Quality checks to apply:
+1. Does the answer directly state the key figure the user asked for (amount, %, date)?
+2. If the user asked about a time range, does the answer confirm which range was queried?
+3. Are all ₹ amounts plausibly from tool data (not computed inline)?
+4. If the answer is "no data available", does it explain what data is missing and why?
+
 Scoring guide:
-  1.0 — All figures cited, data clearly sourced, question fully answered.
-  0.7 — Mostly answered; minor data gaps or hedging.
-  0.5 — Partial answer; key data missing.
-  0.0 — No useful answer produced.
+  1.0 — All figures present, time range confirmed, data clearly sourced.
+  0.8 — Key figure present; minor gap (e.g. no data freshness citation).
+  0.6 — Partial answer; key figure present but time range or sourcing unclear.
+  0.4 — Answer is vague or hedged without citing tool results.
+  0.0 — No useful answer or the answer appears to compute figures inline.
 
 Be strict: if the answer says "data unavailable" without explaining why,
-score ≤ 0.5.
+score ≤ 0.4.
 """
 
 
@@ -153,19 +160,16 @@ class ReflectionNode:
         draft_answer = ""
         for m in messages:
             if isinstance(m, HumanMessage) and not question:
-                q = m.content
-                # Strip owner_id token if present
-                if q.startswith("[owner_id="):
-                    q = q.split("] ", 1)[-1]
-                question = q
+                question = m.content
             content = getattr(m, "content", "")
             if content and not isinstance(m, HumanMessage):
                 draft_answer = content  # keep updating — we want the last AI content
 
         result = await self._evaluate(question, draft_answer, callbacks=callbacks)
 
-        # Decide whether to re-run
-        if not result.is_complete and reflect_count < MAX_REFLECT_ITERATIONS:
+        # Decide whether to re-run: incomplete OR below confidence threshold
+        below_threshold = result.confidence_score < REFLECTION_THRESHOLD
+        if (not result.is_complete or below_threshold) and reflect_count < MAX_REFLECT_ITERATIONS:
             result.needs_rerun = True
             log.info(
                 "reflection.needs_rerun",
@@ -221,12 +225,12 @@ class ReflectionNode:
                 score = max(0.0, min(1.0, score))  # clamp to [0, 1]
                 is_complete = bool(data.get("is_complete", True))
                 notes = str(data.get("reflection_notes", ""))
-                needs_rerun = not is_complete and score < REFLECTION_THRESHOLD
+                # needs_rerun is set by acall() after checking reflect_count
                 return ReflectionResult(
                     confidence_score=score,
                     is_complete=is_complete,
                     reflection_notes=notes,
-                    needs_rerun=needs_rerun,
+                    needs_rerun=False,
                 )
             except Exception:
                 continue

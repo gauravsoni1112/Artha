@@ -155,7 +155,12 @@ function AssistantBubble({
     currentState === "REJECTED" ||
     currentState === "MODIFIED";
 
-  const answers = response ? agentAnswers(response.agent_outputs_json ?? []) : [];
+  const synthesized = response?.synthesized_answer?.trim() ?? "";
+  const answers = response
+    ? synthesized
+      ? [{ id: "synthesized", label: "", answer: synthesized }]
+      : agentAnswers(response.agent_outputs_json ?? [])
+    : [];
   const followUps = isLast && response ? suggestFollowUps(response) : [];
 
   async function handleEvent(eventType: "ACCEPTED" | "REJECTED") {
@@ -178,7 +183,7 @@ function AssistantBubble({
   }
 
   async function handleCopy() {
-    const text = answers.map((a) => a.answer).join("\n\n");
+    const text = synthesized || answers.map((a) => a.answer).join("\n\n");
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);

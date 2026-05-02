@@ -78,7 +78,13 @@
       "Read(//tmp/**)",
       "Bash(mkdir -p /tmp/design_files)",
       "Bash(tar -xf /tmp/design -C /tmp/design_files)",
-      "Bash(brew install *)"
+      "Bash(brew install *)",
+      "Bash(.venv/bin/python3 *)",
+      "Bash(node -e ' *)",
+      "Skill(docker)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(psql *)"
     ]
-  }
+  },
+  "enabledPlugins": {}
 }

@@ -35,7 +35,9 @@ _SUMMARISE_SYSTEM = """\
 You are summarising a financial assistant conversation for context compression.
 Write a concise paragraph (3–6 sentences) capturing the key facts discussed:
 which financial data was queried, what amounts were mentioned, and any
-decisions or observations the user made.  Do NOT include greetings or filler.
+decisions or observations the user made. Do NOT include greetings or filler.
+Preserve all ₹ amounts exactly as stated. Note any fiscal years mentioned.
+Record any preferences or goals the user expressed.
 Output only the summary paragraph, nothing else.
 """
 
@@ -86,7 +88,7 @@ async def _summarise(messages: list, llm: Any, prior_summary: str | None) -> str
         role = type(m).__name__.replace("Message", "").lower()
         content = getattr(m, "content", str(m))
         if isinstance(content, str):
-            lines.append(f"{role}: {content[:300]}")  # cap per-message length
+            lines.append(f"{role}: {content[:600]}")  # cap per-message length
 
     conversation_text = "\n".join(lines)
 

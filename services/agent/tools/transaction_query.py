@@ -30,7 +30,14 @@ async def run(
     account_id: str | None = None,
     limit: int = 50,
 ) -> ToolResult:
-    """Fetch transactions for an owner filtered by date range, category, or account."""
+    """Fetch individual transactions filtered by date, category, or account.
+
+    Prefer category_analysis when the user asks for spending totals by category.
+    Use this tool when the user wants to see a LIST of specific transactions,
+    or when filtering by a single account after using fetch_accounts.
+    After fetching, pass any sums or percentages to the calculate_* tools
+    rather than computing them inline.
+    """
     log.info(
         "tool.transaction_query.start",
         owner_id=owner_id,

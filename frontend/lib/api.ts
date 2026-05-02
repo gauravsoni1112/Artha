@@ -11,7 +11,9 @@ import type {
   AuditRecommendation,
   FamilyMember,
   FinancialGoal,
+  Holding,
   IngestionRun,
+  NetWorthResponse,
   Owner,
   QuarantineRecord,
   RecommendationEventRequest,
@@ -19,6 +21,7 @@ import type {
   RecommendationRequest,
   RecommendationResponse,
   RecommendationSummary,
+  TaxDataRecord,
   TokenResponse,
   Transaction,
   UserProfile,
@@ -363,6 +366,44 @@ export const staticData = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+};
+
+// ---------------------------------------------------------------------------
+// Holdings
+// ---------------------------------------------------------------------------
+
+export interface CreateHoldingBody {
+  asset_class: string;
+  instrument_name: string;
+  isin?: string | null;
+  units?: number | null;
+  nav_paise?: number | null;
+  purchase_price_paise?: number | null;
+  current_value_paise?: number | null;
+  valuation_date?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export const holdings = {
+  list: (ownerId: string) => request<Holding[]>(`/owners/${ownerId}/holdings`),
+  create: (ownerId: string, body: CreateHoldingBody) =>
+    request<Holding>(`/owners/${ownerId}/holdings`, { method: "POST", body: JSON.stringify(body) }),
+};
+
+// ---------------------------------------------------------------------------
+// Net Worth
+// ---------------------------------------------------------------------------
+
+export const netWorth = {
+  get: (ownerId: string) => request<NetWorthResponse>(`/owners/${ownerId}/net-worth`),
+};
+
+// ---------------------------------------------------------------------------
+// Tax Data
+// ---------------------------------------------------------------------------
+
+export const taxData = {
+  list: (ownerId: string) => request<TaxDataRecord[]>(`/owners/${ownerId}/tax-data`),
 };
 
 // ---------------------------------------------------------------------------

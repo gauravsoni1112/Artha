@@ -31,6 +31,31 @@ x-llm-env: &llm-env
   LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
   LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
   LLM_API_KEY: ${LLM_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+# Per-role LLM routing — forwarded so RoutingPolicy.from_env() works inside containers.
+# These override LLM_PROVIDER/LLM_MODEL on a per-role basis.
+# See .env for full documentation of EXECUTOR/COMPACTOR/REFLECTOR/SYNTHESIZER/CRITIC roles.
+x-role-env: &role-env
+  EXECUTOR_DESTINATION: ${EXECUTOR_DESTINATION:-local}
+  EXECUTOR_PROVIDER: ${EXECUTOR_PROVIDER:-ollama}
+  EXECUTOR_MODEL: ${EXECUTOR_MODEL:-}
+  COMPACTOR_DESTINATION: ${COMPACTOR_DESTINATION:-local}
+  COMPACTOR_PROVIDER: ${COMPACTOR_PROVIDER:-ollama}
+  COMPACTOR_MODEL: ${COMPACTOR_MODEL:-}
+  REFLECTOR_DESTINATION: ${REFLECTOR_DESTINATION:-local}
+  REFLECTOR_PROVIDER: ${REFLECTOR_PROVIDER:-ollama}
+  REFLECTOR_MODEL: ${REFLECTOR_MODEL:-}
+  REFLECTOR_ANONYMISE: ${REFLECTOR_ANONYMISE:-false}
+  SYNTHESIZER_DESTINATION: ${SYNTHESIZER_DESTINATION:-local}
+  SYNTHESIZER_PROVIDER: ${SYNTHESIZER_PROVIDER:-ollama}
+  SYNTHESIZER_MODEL: ${SYNTHESIZER_MODEL:-}
+  SYNTHESIZER_ANONYMISE: ${SYNTHESIZER_ANONYMISE:-false}
+  CRITIC_DESTINATION: ${CRITIC_DESTINATION:-local}
+  CRITIC_PROVIDER: ${CRITIC_PROVIDER:-ollama}
+  CRITIC_MODEL: ${CRITIC_MODEL:-}
+  CRITIC_ANONYMISE: ${CRITIC_ANONYMISE:-false}
 
 x-tracing-env: &tracing-env
   OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
@@ -188,7 +213,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env]
+      <<: [*db-env, *redis-env, *llm-env, *role-env, *tracing-env, *langfuse-env]
       FILE_STORE_KEY: ${FILE_STORE_KEY:-tRlwcGp_9Xgkykc4hyrpOpmbK1RRC-Oiolpc3IE2mPU=}
       GMAIL_CLIENT_SECRETS: ${GMAIL_CLIENT_SECRETS:-}
       GMAIL_TOKEN_PATH: ${GMAIL_TOKEN_PATH:-}
@@ -224,7 +249,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *role-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: cashflow_agent
       AGENT_ENDPOINT: http://cashflow_agent:8001
       AGENT_CAPABILITIES: cashflow,spending,budget
@@ -256,7 +281,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *role-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: investment_agent
       AGENT_ENDPOINT: http://investment_agent:8002
       AGENT_CAPABILITIES: investment,portfolio,net_worth
@@ -284,7 +309,7 @@ services:
     ports:
       - "8003:8003"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *role-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: tax_agent
       AGENT_ENDPOINT: http://tax_agent:8003
       AGENT_CAPABILITIES: tax,itr,fiscal
@@ -312,7 +337,7 @@ services:
     ports:
       - "8004:8004"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *role-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: risk_agent
       AGENT_ENDPOINT: http://risk_agent:8004
       AGENT_CAPABILITIES: risk,insurance,emergency_fund,debt
@@ -340,7 +365,7 @@ services:
     ports:
       - "8005:8005"
     environment:
-      <<: [*db-env, *redis-env, *llm-env, *tracing-env, *langfuse-env, *agent-tune-env]
+      <<: [*db-env, *redis-env, *llm-env, *role-env, *tracing-env, *langfuse-env, *agent-tune-env]
       AGENT_ID: goal_agent
       AGENT_ENDPOINT: http://goal_agent:8005
       AGENT_CAPABILITIES: goal,planning,savings

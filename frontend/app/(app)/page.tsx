@@ -1,20 +1,21 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { RiskArc } from "@/components/charts/RiskArc";
-import type { ViewMode } from "@/components/layout/Sidebar";
-
-// ── Static demo data ─────────────────────────────────────────
-const BAR_DATA = [
-  { income: 65, expense: 42 }, { income: 58, expense: 50 },
-  { income: 72, expense: 38 }, { income: 61, expense: 45 },
-  { income: 78, expense: 52 }, { income: 69, expense: 41 }, { income: 82, expense: 48 },
-];
-const MONTHS = ["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
+import { TimeRangeTabs } from "@/components/layout/TimeRangeTabs";
+import {
+  useMultiOwnerAccounts,
+  useMultiOwnerGoals,
+  useMultiOwnerHoldings,
+  useMultiOwnerNetWorth,
+  useMultiOwnerTransactions,
+} from "@/lib/queries";
+import { formatINRShort } from "@/lib/format";
+import { getTimeRangeDates, useOwnerIds, useTimeRange, useViewMode } from "@/lib/viewmode";
 
 const ALL_INSIGHTS = [
   { id: 1, type: "amber", label: "Tax Opportunity", bold: "₹32K unrealized loss", rest: " in INFY offsets ₹58K STCG. Harvest before Mar 31.", cta: "View holdings →", route: "/tax" },
@@ -23,7 +24,40 @@ const ALL_INSIGHTS = [
   { id: 4, type: "green", label: "SIP Health", bold: "5 SIPs active", rest: ". Next debit ₹35K on May 1. Parag Parikh leads (+19.2%).", cta: null, route: "/investments" },
 ];
 
-// ── Helpers ───────────────────────────────────────────────────
+const GOAL_COLORS = [
+  "var(--green)", "var(--cyan)", "var(--amber)", "var(--red)",
+];
+
+function goalColor(index: number, pct: number): string {
+  if (pct >= 100) return "var(--green)";
+  return GOAL_COLORS[index % GOAL_COLORS.length];
+}
+
+function accountIcon(type: string): string {
+  const icons: Record<string, string> = {
+    SAVINGS: "🏦", CURRENT: "🏦", SALARY: "🏦",
+    BROKER: "📈", DEMAT: "📈",
+    MUTUAL_FUND: "💼",
+    CREDIT_CARD: "💳",
+    FIXED_DEPOSIT: "🏦",
+    LOAN: "💰",
+    PPF: "🏛️", NPS: "🏛️",
+  };
+  return icons[type] ?? "💳";
+}
+
+function accountBg(type: string): string {
+  const bgs: Record<string, string> = {
+    SAVINGS: "rgba(0,180,140,0.12)", CURRENT: "rgba(0,180,140,0.12)", SALARY: "rgba(0,180,140,0.12)",
+    BROKER: "rgba(0,160,220,0.12)", DEMAT: "rgba(0,160,220,0.12)",
+    MUTUAL_FUND: "rgba(160,100,240,0.12)",
+    CREDIT_CARD: "rgba(240,80,80,0.12)",
+    LOAN: "rgba(240,80,80,0.12)",
+    FIXED_DEPOSIT: "rgba(240,180,0,0.12)",
+  };
+  return bgs[type] ?? "rgba(120,120,120,0.12)";
+}
+
 function LiveDot() {
   return (
     <span
@@ -137,53 +171,139 @@ function QuickBtn({ children, onClick }: { children: React.ReactNode; onClick?: 
   );
 }
 
-// ── Dashboard Page ────────────────────────────────────────────
 export default function DashboardPage() {
   const router = useRouter();
   const { owner } = useAuth();
-  const [timeRange, setTimeRange] = useState("FY");
+  const { timeRange } = useTimeRange();
   const [dismissed, setDismissed] = useState<number[]>([]);
-  const [viewMode, setViewMode] = useState<ViewMode>("individual");
-
-  useEffect(() => {
-    const stored = localStorage.getItem("artha-view") as ViewMode | null;
-    if (stored === "individual" || stored === "family") setViewMode(stored);
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as ViewMode;
-      if (detail === "individual" || detail === "family") setViewMode(detail);
-    };
-    window.addEventListener("artha-view-change", handler);
-    return () => window.removeEventListener("artha-view-change", handler);
-  }, []);
-
-  const isFamily = viewMode === "family";
+  const { isFamily } = useViewMode();
   const firstName = owner?.name?.split(" ")[0] ?? "there";
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
-  const nwData    = isFamily ? [14.2, 15.1, 15.8, 16.5, 17.1, 17.8, 18.4] : [12.1, 12.8, 13.2, 13.9, 14.5, 14.8, 15.1];
-  const portData  = isFamily ? [9.1, 9.8, 10.1, 9.6, 10.4, 10.9, 11.2]    : [7.2, 7.8, 8.1, 7.6, 8.4, 8.9, 9.2];
-  const nwLabel   = isFamily ? "₹18.4Cr" : "₹15.1Cr";
-  const portLabel = isFamily ? "₹11.2Cr" : "₹9.2Cr";
-  const cfLabel   = isFamily ? "+₹7.8L"  : "+₹5.5L";
-  const savRate   = isFamily ? "61%"      : "67%";
+  const ownerIds = useOwnerIds();
 
-  const GOALS_DATA = [
-    { name: "New Home",       pct: 100, color: "var(--green)", cur: "₹18L",  target: "₹18L"  },
-    { name: "Emergency Fund", pct: 70,  color: "var(--amber)", cur: "₹3.5L", target: "₹5L"   },
-    { name: "Europe Trip",    pct: 30,  color: "var(--red)",   cur: "₹45K",  target: "₹1.5L" },
-    { name: "Kid's Education",pct: 22,  color: "var(--cyan)",  cur: "₹2.2L", target: "₹10L"  },
-  ];
+  // ── Data hooks ────────────────────────────────────────────────
+  const { data: goalsData } = useMultiOwnerGoals(ownerIds);
+  const { data: accountsList } = useMultiOwnerAccounts(ownerIds);
+  const { data: netWorthData } = useMultiOwnerNetWorth(ownerIds);
+  const { data: holdingsData } = useMultiOwnerHoldings(ownerIds);
 
-  const ACCOUNTS = [
-    { icon: "🏦", name: "HDFC Savings", sub: "Last sync 2m ago", val: "₹4.2L", bg: "rgba(0,180,140,0.12)" },
-    { icon: "📈", name: "Zerodha",      sub: "47 holdings",      val: "₹6.1L", bg: "rgba(0,160,220,0.12)" },
-    { icon: "💼", name: "MF Portfolio", sub: "12 schemes",       val: "₹3.1L", bg: "rgba(160,100,240,0.12)"},
-    { icon: "💳", name: "HDFC Credit",  sub: "Due May 5",        val: "−₹32K", bg: "rgba(240,80,80,0.12)", negative: true },
-  ];
+  const txnFilters = useMemo(() => ({ ...getTimeRangeDates(timeRange), limit: 500 }), [timeRange]);
+  const { data: txns } = useMultiOwnerTransactions(ownerIds, txnFilters);
+
+  // ── Goals (F1) ────────────────────────────────────────────────
+  const activeGoals = useMemo(() => (goalsData ?? []).filter((g) => g.is_active), [goalsData]);
+
+  // ── Accounts (F2) ─────────────────────────────────────────────
+  const accountsDisplay = useMemo(() => {
+    const list = accountsList ?? [];
+    if (list.length === 0) return [];
+    return list.slice(0, 4).map((a) => ({
+      icon: accountIcon(a.account_type),
+      name: a.nickname ?? a.institution,
+      sub: a.institution,
+      val: a.balance_paise != null ? formatINRShort(Math.abs(a.balance_paise)) : "—",
+      bg: accountBg(a.account_type),
+      negative: (a.balance_paise ?? 0) < 0,
+    }));
+  }, [accountsList]);
+
+  const liquidPaise = useMemo(() => {
+    return (accountsList ?? [])
+      .filter((a) => !["LOAN", "CREDIT_CARD"].includes(a.account_type))
+      .reduce((sum, a) => sum + (a.balance_paise ?? 0), 0);
+  }, [accountsList]);
+
+  // ── Cashflow bar chart (F3) ───────────────────────────────────
+  const { barData, barMonths, cfLabel, incomeLabel, expenseLabel, savingsRate } = useMemo(() => {
+    if (!txns?.length) {
+      return {
+        barData: [] as { income: number; expense: number }[],
+        barMonths: [] as string[],
+        cfLabel: "—",
+        incomeLabel: "—",
+        expenseLabel: "—",
+        savingsRate: "—",
+      };
+    }
+
+    const monthMap = new Map<string, { income: number; expense: number }>();
+    for (const t of txns) {
+      const month = t.transaction_date.slice(0, 7);
+      if (!monthMap.has(month)) monthMap.set(month, { income: 0, expense: 0 });
+      const m = monthMap.get(month)!;
+      if (t.transaction_type === "CREDIT") m.income += t.amount_paise;
+      else m.expense += t.amount_paise;
+    }
+
+    const sorted = Array.from(monthMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+    const last7 = sorted.slice(-7);
+
+    const bd = last7.map(([, v]) => ({ income: v.income, expense: v.expense }));
+    const bm = last7.map(([m]) => {
+      const [y, mo] = m.split("-");
+      return new Date(Number(y), Number(mo) - 1).toLocaleString("en-IN", { month: "short" });
+    });
+
+    const latestMonth = last7[last7.length - 1]?.[1];
+    const netCF = latestMonth ? latestMonth.income - latestMonth.expense : 0;
+    const totalIncome = (latestMonth?.income ?? 0);
+    const totalExpense = (latestMonth?.expense ?? 0);
+    const rate = totalIncome > 0 ? Math.round(((totalIncome - totalExpense) / totalIncome) * 100) : 0;
+
+    return {
+      barData: bd,
+      barMonths: bm,
+      cfLabel: netCF >= 0 ? `+${formatINRShort(netCF)}` : formatINRShort(netCF),
+      incomeLabel: `+${formatINRShort(totalIncome)}`,
+      expenseLabel: `−${formatINRShort(totalExpense)}`,
+      savingsRate: `${rate}%`,
+    };
+  }, [txns]);
+
+  const maxBarPaise = useMemo(
+    () => Math.max(...barData.map((b) => Math.max(b.income, b.expense)), 1),
+    [barData]
+  );
+
+  // ── Net Worth (F4) ────────────────────────────────────────────
+  const nwPaise = netWorthData?.net_worth_paise ?? 0;
+  const nwLabel = nwPaise > 0 ? formatINRShort(nwPaise) : "—";
+  const nwSparkData = useMemo(() => {
+    const hist = netWorthData?.history ?? [];
+    if (hist.length === 0) return [0, 0];
+    return hist.slice(-7).map((h) => h.net_worth_paise / 1e7);
+  }, [netWorthData]);
+
+  const lastTwoNW = netWorthData?.history.slice(-2) ?? [];
+  const nwChangePaise = lastTwoNW.length >= 2
+    ? lastTwoNW[1].net_worth_paise - lastTwoNW[0].net_worth_paise
+    : 0;
+  const nwChangePct = lastTwoNW.length >= 2 && lastTwoNW[0].net_worth_paise > 0
+    ? ((nwChangePaise / lastTwoNW[0].net_worth_paise) * 100).toFixed(1)
+    : "0.0";
+
+  // ── Portfolio (F4 + F6 preview) ───────────────────────────────
+  const portValuePaise = useMemo(
+    () => (holdingsData ?? []).reduce((s, h) => s + (h.current_value_paise ?? 0), 0),
+    [holdingsData]
+  );
+  const portLabel = portValuePaise > 0 ? formatINRShort(portValuePaise) : "—";
+
+  // Donut segments from assets_by_category (or holdings if no networth yet)
+  const donutSegments = useMemo(() => {
+    const cats = netWorthData?.assets_by_category ?? [];
+    if (cats.length === 0) return [
+      { value: 58, color: "oklch(0.76 0.16 195)" },
+      { value: 28, color: "oklch(0.73 0.16 145)" },
+      { value: 14, color: "oklch(0.76 0.16 65)" },
+    ];
+    const colors = ["oklch(0.76 0.16 195)", "oklch(0.73 0.16 145)", "oklch(0.76 0.16 65)", "oklch(0.6 0.12 270)", "oklch(0.82 0.14 80)"];
+    return cats.slice(0, 5).map((c, i) => ({ value: c.pct, color: colors[i] }));
+  }, [netWorthData]);
 
   const insights = ALL_INSIGHTS.filter((i) => !dismissed.includes(i.id));
-  const maxB = 82;
 
   return (
     <>
@@ -201,19 +321,7 @@ export default function DashboardPage() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ display: "flex", gap: 2, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 3 }}>
-            {["1M", "3M", "FY", "All"].map((r) => (
-              <button key={r} onClick={() => setTimeRange(r)}
-                style={{
-                  padding: "4px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
-                  cursor: "pointer", transition: "all 0.15s", fontFamily: "inherit",
-                  border: timeRange === r ? "1px solid var(--border-bright)" : "1px solid transparent",
-                  background: timeRange === r ? "var(--bg3)" : "none",
-                  color: timeRange === r ? "var(--cyan)" : "var(--text-2)",
-                }}
-              >{r}</button>
-            ))}
-          </div>
+          <TimeRangeTabs />
           <TopIconBtn title="Upload statement">↑</TopIconBtn>
           <TopIconBtn title="Notifications" dot>🔔</TopIconBtn>
         </div>
@@ -226,7 +334,7 @@ export default function DashboardPage() {
           <strong style={{ color: "var(--cyan)" }}>You&apos;re ₹12K under budget</strong> this month
         </span>
         <span style={{ color: "var(--text-3)" }}>·</span>
-        <HlTag color="green">3 goals on track</HlTag>
+        <HlTag color="green">{activeGoals.filter((g) => g.progress_pct >= 80).length || 3} goals on track</HlTag>
         <span style={{ color: "var(--text-3)" }}>·</span>
         <HlTag color="amber">Tax due Jul 31</HlTag>
         <span style={{ color: "var(--text-3)" }}>·</span>
@@ -254,10 +362,10 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Main grid — Row 1: NW(3) + Cashflow(5) + Portfolio(4) */}
+        {/* Main grid */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
 
-          {/* Net Worth */}
+          {/* Net Worth (F4) */}
           <Tile span={3} onClick={() => router.push("/networth")}>
             <TileLabel icon={<LiveDot />}>
               Net Worth{isFamily && (
@@ -265,38 +373,46 @@ export default function DashboardPage() {
               )}
             </TileLabel>
             <TileValue size="lg">{nwLabel}</TileValue>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-              <Delta dir="up">▲ ₹42L</Delta>
-              <Delta dir="up">+2.9%</Delta>
-              <span style={{ fontSize: 10, color: "var(--text-3)" }}>vs last month</span>
-            </div>
-            <Sparkline data={nwData} color="oklch(0.76 0.16 195)" height={44} />
+            {nwChangePaise !== 0 && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <Delta dir={nwChangePaise >= 0 ? "up" : "down"}>
+                  {nwChangePaise >= 0 ? "▲" : "▼"} {formatINRShort(Math.abs(nwChangePaise))}
+                </Delta>
+                <Delta dir={nwChangePaise >= 0 ? "up" : "down"}>
+                  {nwChangePaise >= 0 ? "+" : ""}{nwChangePct}%
+                </Delta>
+                <span style={{ fontSize: 10, color: "var(--text-3)" }}>vs last month</span>
+              </div>
+            )}
+            <Sparkline data={nwSparkData} color="oklch(0.76 0.16 195)" height={44} />
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-3)", marginTop: 4, fontFamily: "JetBrains Mono, monospace" }}>
-              <span>Oct</span><span>Apr</span>
+              <span>{barMonths[0] ?? "Oct"}</span><span>{barMonths[barMonths.length - 1] ?? "Apr"}</span>
             </div>
-            <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 6 }}>
-              Equity <strong style={{ color: "var(--text-2)" }}>{isFamily ? "₹11.2Cr" : "₹9.2Cr"}</strong> · MF{" "}
-              <strong style={{ color: "var(--text-2)" }}>{isFamily ? "₹4.8Cr" : "₹3.1Cr"}</strong> · Cash{" "}
-              <strong style={{ color: "var(--text-2)" }}>{isFamily ? "₹2.4Cr" : "₹2.8Cr"}</strong>
-            </div>
+            {netWorthData && (
+              <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 6 }}>
+                Assets <strong style={{ color: "var(--text-2)" }}>{formatINRShort(netWorthData.total_assets_paise)}</strong>
+                {netWorthData.total_liabilities_paise > 0 && (
+                  <> · Liab <strong style={{ color: "var(--red)" }}>{formatINRShort(netWorthData.total_liabilities_paise)}</strong></>
+                )}
+              </div>
+            )}
           </Tile>
 
-          {/* Cashflow */}
+          {/* Cashflow (F3) */}
           <Tile span={5} onClick={() => router.push("/transactions")}>
             <TileLabel>Monthly Cashflow</TileLabel>
             <div style={{ display: "flex", gap: 20, alignItems: "flex-end", marginBottom: 10 }}>
               <div>
                 <TileValue color="var(--green)">{cfLabel}</TileValue>
                 <div style={{ display: "flex", gap: 6 }}>
-                  <Delta dir="up">▲ ₹60K</Delta>
-                  <Delta dir="up">+12.2%</Delta>
+                  <Delta dir="up">this month</Delta>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 20 }}>
                 {[
-                  { label: "Income",   val: isFamily ? "+₹11.4L" : "+₹8.2L", color: "var(--green)" },
-                  { label: "Expenses", val: isFamily ? "−₹3.6L"  : "−₹2.7L", color: "var(--red)"   },
-                  { label: "Savings",  val: savRate,                           color: "var(--green)" },
+                  { label: "Income",   val: incomeLabel,   color: "var(--green)" },
+                  { label: "Expenses", val: expenseLabel,  color: "var(--red)"   },
+                  { label: "Savings",  val: savingsRate,   color: "var(--green)" },
                 ].map((s) => (
                   <div key={s.label}>
                     <div style={{ fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 3 }}>{s.label}</div>
@@ -305,17 +421,23 @@ export default function DashboardPage() {
                 ))}
               </div>
             </div>
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 72 }}>
-              {BAR_DATA.map((b, i) => (
-                <div key={i} style={{ flex: 1, display: "flex", gap: 1.5, alignItems: "flex-end" }}>
-                  <div style={{ flex: 1, borderRadius: "2px 2px 0 0", minHeight: 2, height: `${(b.income / maxB) * 100}%`, background: "var(--green)", opacity: 0.7 }} />
-                  <div style={{ flex: 1, borderRadius: "2px 2px 0 0", minHeight: 2, height: `${(b.expense / maxB) * 100}%`, background: "var(--red)", opacity: 0.6 }} />
+            {barData.length > 0 ? (
+              <>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 72 }}>
+                  {barData.map((b, i) => (
+                    <div key={i} style={{ flex: 1, display: "flex", gap: 1.5, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1, borderRadius: "2px 2px 0 0", minHeight: 2, height: `${(b.income / maxBarPaise) * 100}%`, background: "var(--green)", opacity: 0.7 }} />
+                      <div style={{ flex: 1, borderRadius: "2px 2px 0 0", minHeight: 2, height: `${(b.expense / maxBarPaise) * 100}%`, background: "var(--red)", opacity: 0.6 }} />
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 3, marginTop: 5 }}>
-              {MONTHS.map((m) => <div key={m} style={{ flex: 1, textAlign: "center", fontSize: 9, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>{m}</div>)}
-            </div>
+                <div style={{ display: "flex", gap: 3, marginTop: 5 }}>
+                  {barMonths.map((m) => <div key={m} style={{ flex: 1, textAlign: "center", fontSize: 9, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>{m}</div>)}
+                </div>
+              </>
+            ) : (
+              <div style={{ height: 72, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--text-3)" }}>No transaction data yet</div>
+            )}
           </Tile>
 
           {/* Portfolio */}
@@ -325,9 +447,9 @@ export default function DashboardPage() {
               <div style={{ flex: 1 }}>
                 <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
                   {[
-                    { label: "Value",      val: portLabel,                              color: "var(--cyan)"  },
-                    { label: "Today P&L",  val: isFamily ? "+₹2.36L" : "+₹1.94L",      color: "var(--green)" },
-                    { label: "XIRR",       val: "18.4%",                               color: "var(--green)" },
+                    { label: "Value", val: portLabel, color: "var(--cyan)" },
+                    { label: "Today P&L", val: "—", color: "var(--text-3)" },
+                    { label: "XIRR", val: "—", color: "var(--text-3)" },
                   ].map((k) => (
                     <div key={k.label}>
                       <div style={{ fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{k.label}</div>
@@ -335,49 +457,60 @@ export default function DashboardPage() {
                     </div>
                   ))}
                 </div>
-                <Sparkline data={portData} color="oklch(0.76 0.16 195)" height={46} />
+                <Sparkline data={nwSparkData} color="oklch(0.76 0.16 195)" height={46} />
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-3)", marginTop: 4, fontFamily: "JetBrains Mono, monospace" }}>
-                  <span>Oct</span><span>+27.4% vs Nifty</span>
+                  <span>{barMonths[0] ?? "Oct"}</span><span>Portfolio trend</span>
                 </div>
               </div>
               <div style={{ flexShrink: 0 }}>
-                <Donut size={72} segments={[
-                  { value: 58, color: "oklch(0.76 0.16 195)" },
-                  { value: 28, color: "oklch(0.73 0.16 145)" },
-                  { value: 14, color: "oklch(0.76 0.16 65)"  },
-                ]} />
-                <div style={{ fontSize: 9, color: "var(--text-3)", textAlign: "center", marginTop: 4 }}>EQ/MF/Cash</div>
+                <Donut size={72} segments={donutSegments} />
+                <div style={{ fontSize: 9, color: "var(--text-3)", textAlign: "center", marginTop: 4 }}>By category</div>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Delta dir="up">+2.1% today</Delta>
-              <span style={{ fontSize: 11, color: "var(--amber)", background: "var(--amber-dim)", padding: "2px 7px", borderRadius: 4, fontFamily: "JetBrains Mono, monospace" }}>⚠ Concentrated</span>
-            </div>
+            {holdingsData && holdingsData.length > 0 && (
+              <div style={{ display: "flex", gap: 8 }}>
+                <span style={{ fontSize: 11, color: "var(--text-3)", background: "var(--bg3)", padding: "2px 7px", borderRadius: 4, fontFamily: "JetBrains Mono, monospace" }}>
+                  {holdingsData.length} holdings
+                </span>
+              </div>
+            )}
           </Tile>
 
-          {/* Goals */}
+          {/* Goals (F1) */}
           <Tile span={4} onClick={() => router.push("/goals")}>
             <TileLabel>Goals</TileLabel>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
-              <TileValue size="sm">4 active</TileValue>
-              <Delta dir="up">3 on track</Delta>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {GOALS_DATA.map((g) => (
-                <div key={g.name}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
-                    <span style={{ fontSize: 12, color: "var(--text-2)" }}>{g.name}</span>
-                    <span style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 11, color: g.color }}>{g.pct}%</span>
-                  </div>
-                  <div style={{ height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
-                    <div style={{ width: `${g.pct}%`, height: "100%", borderRadius: 2, background: g.color, transition: "width 0.8s ease" }} />
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 10, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>
-                    <span>{g.cur}</span><span>{g.target}</span>
-                  </div>
+            {activeGoals.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--text-3)", textAlign: "center", padding: "20px 0" }}>
+                No goals set yet
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+                  <TileValue size="sm">{activeGoals.length} active</TileValue>
+                  <Delta dir="up">{activeGoals.filter((g) => g.progress_pct >= 80).length} on track</Delta>
                 </div>
-              ))}
-            </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {activeGoals.slice(0, 4).map((g, i) => {
+                    const color = goalColor(i, g.progress_pct);
+                    return (
+                      <div key={g.id}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                          <span style={{ fontSize: 12, color: "var(--text-2)" }}>{g.goal_name}</span>
+                          <span style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 11, color }}>{g.progress_pct}%</span>
+                        </div>
+                        <div style={{ height: 4, background: "var(--bg3)", borderRadius: 2, overflow: "hidden" }}>
+                          <div style={{ width: `${Math.min(g.progress_pct, 100)}%`, height: "100%", borderRadius: 2, background: color, transition: "width 0.8s ease" }} />
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 10, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>
+                          <span>{formatINRShort(g.current_amount_paise)}</span>
+                          <span>{formatINRShort(g.target_amount_paise)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </Tile>
 
           {/* Tax */}
@@ -417,23 +550,27 @@ export default function DashboardPage() {
             </div>
           </Tile>
 
-          {/* Accounts */}
+          {/* Accounts (F2) */}
           <Tile span={3} onClick={() => router.push("/accounts")}>
             <TileLabel>Accounts</TileLabel>
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-              <TileValue size="sm">{isFamily ? "₹9.2L" : "₹6.7L"}</TileValue>
+              <TileValue size="sm">{liquidPaise > 0 ? formatINRShort(liquidPaise) : "—"}</TileValue>
               <span style={{ fontSize: 10, color: "var(--text-3)" }}>liquid</span>
             </div>
-            {ACCOUNTS.map((a) => (
-              <div key={a.name} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                <div style={{ width: 28, height: 28, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, flexShrink: 0, background: a.bg }}>{a.icon}</div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12, color: "var(--text-2)" }}>{a.name}</div>
-                  <div style={{ fontSize: 10, color: "var(--text-3)" }}>{a.sub}</div>
+            {accountsDisplay.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--text-3)", textAlign: "center", padding: "10px 0" }}>No accounts yet</div>
+            ) : (
+              accountsDisplay.map((a, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, flexShrink: 0, background: a.bg }}>{a.icon}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, color: "var(--text-2)" }}>{a.name}</div>
+                    <div style={{ fontSize: 10, color: "var(--text-3)" }}>{a.sub}</div>
+                  </div>
+                  <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: a.negative ? "var(--red)" : "var(--text)" }}>{a.val}</div>
                 </div>
-                <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: (a as typeof a & { negative?: boolean }).negative ? "var(--red)" : "var(--text)" }}>{a.val}</div>
-              </div>
-            ))}
+              ))
+            )}
           </Tile>
 
         </div>
@@ -447,7 +584,9 @@ export default function DashboardPage() {
           <div style={{ flex: 1 }} />
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <LiveDot />
-            <span style={{ fontSize: 11, color: "var(--text-3)" }}>Last sync <strong style={{ color: "var(--text-2)" }}>2 min ago</strong> · 847 txns</span>
+            <span style={{ fontSize: 11, color: "var(--text-3)" }}>
+              {txns ? `${txns.length} txns loaded` : "Loading..."}
+            </span>
           </div>
         </div>
       </div>
@@ -477,7 +616,6 @@ export default function DashboardPage() {
   );
 }
 
-// ── Helpers ───────────────────────────────────────────────────
 function TopIconBtn({ children, title, dot }: { children: React.ReactNode; title?: string; dot?: boolean }) {
   const [hovered, setHovered] = useState(false);
   return (

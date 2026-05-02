@@ -26,6 +26,7 @@ const QUICK_CHIPS = [
 ];
 
 function extractContent(response: RecommendationResponse): string {
+  if (response.synthesized_answer?.trim()) return response.synthesized_answer.trim();
   const outputs = response.agent_outputs_json ?? [];
   const answers = outputs
     .filter((ao) => !ao.error && ao.response?.result)
@@ -39,7 +40,7 @@ function extractContent(response: RecommendationResponse): string {
 
 export function AskArtha() {
   const { owner } = useAuth();
-  const { messages, addMessage, clearThread, hydrated } = useChatThread();
+  const { messages, addMessage, clearThread, hydrated } = useChatThread(owner?.owner_id);
   const [input, setInput] = useState("");
   const mutation = useAskArtha();
 

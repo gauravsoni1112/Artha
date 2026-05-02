@@ -4,8 +4,8 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-
-export type ViewMode = "individual" | "family";
+import { ARTHA_VIEW_KEY } from "@/lib/viewmode";
+import type { ViewMode } from "@/lib/viewmode";
 
 const NAV_MAIN = [
   { href: "/", icon: "⬡", label: "Dashboard" },
@@ -99,14 +99,14 @@ export function Sidebar() {
   const [viewMode, setViewMode] = useState<ViewMode>("individual");
 
   useEffect(() => {
-    const stored = localStorage.getItem("artha-view") as ViewMode | null;
+    const stored = localStorage.getItem(ARTHA_VIEW_KEY) as ViewMode | null;
     if (stored === "individual" || stored === "family") setViewMode(stored);
   }, []);
 
   function toggleView() {
     const next: ViewMode = viewMode === "individual" ? "family" : "individual";
     setViewMode(next);
-    localStorage.setItem("artha-view", next);
+    localStorage.setItem(ARTHA_VIEW_KEY, next);
     window.dispatchEvent(new CustomEvent("artha-view-change", { detail: next }));
   }
 

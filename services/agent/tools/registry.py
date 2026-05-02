@@ -44,7 +44,13 @@ from services.agent.tools.calculate import (
 # ── Input schemas (used by LangGraph for JSON schema extraction) ───────────────
 
 class FetchAccountsInput(BaseModel):
-    account_type: str | None = Field(None, description="Filter by account type e.g. BANK, CREDIT_CARD, INVESTMENT")
+    account_type: str | None = Field(
+        None,
+        description=(
+            "Filter by account type. Exact values: SAVINGS, CHECKING, CREDIT_CARD, DEMAT, MF_FOLIO, PPF, NPS, FD, OTHER. "
+            "Use the shorthand INVESTMENT to fetch all investment accounts (DEMAT, MF_FOLIO, PPF, NPS, FD)."
+        ),
+    )
 
 
 class TransactionQueryInput(BaseModel):

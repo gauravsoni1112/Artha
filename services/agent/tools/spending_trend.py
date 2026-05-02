@@ -28,7 +28,12 @@ async def run(
     category: str | None = None,
     months: int = 6,
 ) -> ToolResult:
-    """Month-over-month spending trend for a category over the last N months."""
+    """Month-over-month spending trend for a category over the last N months.
+
+    Use this when the user asks "is my spending going up?", wants a trend,
+    or asks to compare spending across months. For a single-period category
+    breakdown, use category_analysis instead.
+    """
     log.info("tool.spending_trend.start", owner_id=owner_id, category=category, months=months)
 
     with start_span("tool.spending_trend", {"owner_id": owner_id}):

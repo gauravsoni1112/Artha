@@ -2,23 +2,18 @@
 
 import React, { useMemo, useState } from "react";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
-import { useAuth } from "@/lib/auth";
-import { useTransactions } from "@/lib/queries";
-import { formatDate, formatINR } from "@/lib/format";
+import { TimeRangeTabs } from "@/components/layout/TimeRangeTabs";
+import { useMultiOwnerTransactions } from "@/lib/queries";
+import { formatDate, formatINR, formatINRShort } from "@/lib/format";
+import { getTimeRangeDates, useOwnerIds, useTimeRange } from "@/lib/viewmode";
 
-const BAR_DATA = [
-  { i: 65, e: 42 }, { i: 58, e: 50 }, { i: 72, e: 38 },
-  { i: 61, e: 45 }, { i: 78, e: 52 }, { i: 69, e: 41 }, { i: 82, e: 48 },
-];
-const M_LABELS = ["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
-const MAX_B = 82;
-
-const EXP_BREAK = [
-  { label: "Housing",       pct: 28, color: "oklch(0.76 0.16 195)", val: "₹76K" },
-  { label: "Health",        pct: 22, color: "oklch(0.6 0.12 270)",  val: "₹60K" },
-  { label: "Food",          pct: 18, color: "oklch(0.73 0.16 145)", val: "₹49K" },
-  { label: "Subscriptions", pct: 8,  color: "oklch(0.76 0.16 65)",  val: "₹22K" },
-  { label: "Other",         pct: 24, color: "var(--text-3)",         val: "₹65K" },
+// Colors assigned by rank position so they're always vivid, regardless of category name.
+const CAT_PALETTE = [
+  "oklch(0.76 0.16 195)",  // cyan
+  "oklch(0.6 0.12 270)",   // purple
+  "oklch(0.73 0.16 145)",  // green
+  "oklch(0.76 0.16 65)",   // amber
+  "var(--text-3)",          // gray (Other / overflow)
 ];
 
 const TXN_ICONS: Record<string, string> = {
@@ -28,8 +23,13 @@ const TXN_ICONS: Record<string, string> = {
 type CatFilter = "all" | "income" | "expense" | "investment";
 
 export default function TransactionsPage() {
-  const { owner } = useAuth();
-  const { data: txns, isLoading } = useTransactions(owner?.owner_id, { limit: 100 });
+  const ownerIds = useOwnerIds();
+  const { timeRange } = useTimeRange();
+  const txnFilters = useMemo(
+    () => ({ ...getTimeRangeDates(timeRange), limit: 500 }),
+    [timeRange],
+  );
+  const { data: txns, isLoading } = useMultiOwnerTransactions(ownerIds, txnFilters);
   const [search, setSearch] = useState("");
   const [catF, setCatF] = useState<CatFilter>("all");
 
@@ -62,17 +62,73 @@ export default function TransactionsPage() {
 
   const hasRealData = allTxns.length > 0;
 
-  // Demo KPIs when no real data
-  const kpiIncome     = hasRealData ? formatINR(income)      : "+₹8.2L";
-  const kpiExpenses   = hasRealData ? "−" + formatINR(expenses) : "−₹2.7L";
-  const kpiInvestments = hasRealData ? "−" + formatINR(investments) : "−₹2.0L";
-  const kpiSavings    = hasRealData ? `${savingsRate}%`      : "67%";
+  const kpiIncome      = hasRealData ? formatINR(income)           : "+₹8.2L";
+  const kpiExpenses    = hasRealData ? "−" + formatINR(expenses)   : "−₹2.7L";
+  const kpiInvestments = hasRealData ? "−" + formatINR(investments): "−₹2.0L";
+  const kpiSavings     = hasRealData ? `${savingsRate}%`           : "67%";
+
+  // Monthly bar chart from real data
+  const { barData, barMonths, maxBar } = useMemo(() => {
+    if (!mapped.length) return { barData: [] as { i: number; e: number }[], barMonths: [] as string[], maxBar: 1 };
+    const monthMap = new Map<string, { i: number; e: number }>();
+    for (const t of mapped) {
+      const mo = t.transaction_date.slice(0, 7);
+      if (!monthMap.has(mo)) monthMap.set(mo, { i: 0, e: 0 });
+      const m = monthMap.get(mo)!;
+      if (t.cat === "income") m.i += t.amount_paise;
+      else if (t.cat !== "investment") m.e += t.amount_paise;
+    }
+    const sorted = Array.from(monthMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+    const bd = sorted.map(([, v]) => ({ i: v.i / 1e5, e: v.e / 1e5 }));
+    const bm = sorted.map(([mo]) => {
+      const [y, m] = mo.split("-");
+      return new Date(Number(y), Number(m) - 1).toLocaleString("en-IN", { month: "short" });
+    });
+    const maxVal = Math.max(...bd.map((b) => Math.max(b.i, b.e)), 1);
+    return { barData: bd, barMonths: bm, maxBar: maxVal };
+  }, [mapped]);
+
+  // Expense split by category from real filtered data
+  const expBreak = useMemo(() => {
+    const expenseTxns = mapped.filter((t) => t.cat === "expense");
+    if (!expenseTxns.length) return [] as { label: string; pct: number; color: string; val: string }[];
+
+    const catMap = new Map<string, number>();
+    for (const t of expenseTxns) {
+      const label = t.category ?? "Other";
+      catMap.set(label, (catMap.get(label) ?? 0) + t.amount_paise);
+    }
+
+    const total = Array.from(catMap.values()).reduce((s, v) => s + v, 0);
+    if (total === 0) return [];
+
+    // Sort descending, collapse small categories into "Other"
+    const sorted = Array.from(catMap.entries()).sort(([, a], [, b]) => b - a);
+    const TOP_N = 5;
+    const top = sorted.slice(0, TOP_N - 1);
+    const rest = sorted.slice(TOP_N - 1);
+    const otherPaise = rest.reduce((s, [, v]) => s + v, 0);
+
+    const rows = top.map(([label, paise], i) => ({
+      label,
+      pct: Math.round((paise / total) * 100),
+      color: CAT_PALETTE[i] ?? CAT_PALETTE[CAT_PALETTE.length - 1],
+      val: formatINRShort(paise),
+    }));
+
+    if (otherPaise > 0) {
+      rows.push({ label: "Other", pct: Math.round((otherPaise / total) * 100), color: CAT_PALETTE[CAT_PALETTE.length - 1], val: formatINRShort(otherPaise) });
+    }
+
+    return rows;
+  }, [mapped]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <ScreenHeader
         title="Cashflow"
-        subtitle={hasRealData ? `${allTxns.length} transactions` : "April 2025 · 47 transactions"}
+        subtitle={hasRealData ? `${allTxns.length} transactions · ${timeRange === "FY" ? "Current FY" : timeRange === "All" ? "All time" : `Last ${timeRange}`}` : "No transactions yet"}
+        tabs={<TimeRangeTabs />}
         actions={<ActionBtn color="oklch(0.73 0.16 145)">+ Add Transaction</ActionBtn>}
       />
 
@@ -96,17 +152,23 @@ export default function TransactionsPage() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, marginBottom: 14 }}>
           <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 18px" }}>
             <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 14 }}>Income vs Expenses</div>
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 90 }}>
-              {BAR_DATA.map((b, i) => (
-                <div key={i} style={{ flex: 1, display: "flex", gap: 2, alignItems: "flex-end", height: "100%" }}>
-                  <div style={{ flex: 1, background: "oklch(0.73 0.16 145)", opacity: 0.7, borderRadius: "2px 2px 0 0", height: `${(b.i / MAX_B) * 100}%`, minHeight: 2 }} />
-                  <div style={{ flex: 1, background: "oklch(0.66 0.18 25)", opacity: 0.6, borderRadius: "2px 2px 0 0", height: `${(b.e / MAX_B) * 100}%`, minHeight: 2 }} />
+            {barData.length > 0 ? (
+              <>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 90 }}>
+                  {barData.map((b, i) => (
+                    <div key={i} style={{ flex: 1, display: "flex", gap: 2, alignItems: "flex-end", height: "100%" }}>
+                      <div style={{ flex: 1, background: "oklch(0.73 0.16 145)", opacity: 0.7, borderRadius: "2px 2px 0 0", height: `${(b.i / maxBar) * 100}%`, minHeight: 2 }} />
+                      <div style={{ flex: 1, background: "oklch(0.66 0.18 25)", opacity: 0.6, borderRadius: "2px 2px 0 0", height: `${(b.e / maxBar) * 100}%`, minHeight: 2 }} />
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
-              {M_LABELS.map((m) => <div key={m} style={{ flex: 1, textAlign: "center", fontSize: 9, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>{m}</div>)}
-            </div>
+                <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                  {barMonths.map((m) => <div key={m} style={{ flex: 1, textAlign: "center", fontSize: 9, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>{m}</div>)}
+                </div>
+              </>
+            ) : (
+              <div style={{ height: 90, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--text-3)" }}>No data for this period</div>
+            )}
             <div style={{ display: "flex", gap: 14, marginTop: 10 }}>
               {[["oklch(0.73 0.16 145)", "Income"], ["oklch(0.66 0.18 25)", "Expenses"]].map(([c, l]) => (
                 <div key={l} style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -119,16 +181,22 @@ export default function TransactionsPage() {
 
           <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 18px" }}>
             <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 12 }}>Expense Split</div>
-            <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", gap: 1, marginBottom: 12 }}>
-              {EXP_BREAK.map((c) => <div key={c.label} style={{ flex: c.pct, background: c.color, opacity: 0.8 }} />)}
-            </div>
-            {EXP_BREAK.map((c) => (
-              <div key={c.label} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: c.color, flexShrink: 0 }} />
-                <span style={{ fontSize: 11, color: "var(--text-2)", flex: 1 }}>{c.label}</span>
-                <span style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>{c.val}</span>
-              </div>
-            ))}
+            {expBreak.length === 0 ? (
+              <div style={{ fontSize: 11, color: "var(--text-3)", textAlign: "center", padding: "24px 0" }}>No expense data for this period</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", gap: 1, marginBottom: 12 }}>
+                  {expBreak.map((c) => <div key={c.label} style={{ flex: c.pct, background: c.color, opacity: 0.8 }} />)}
+                </div>
+                {expBreak.map((c) => (
+                  <div key={c.label} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: c.color, flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: "var(--text-2)", flex: 1 }}>{c.label}</span>
+                    <span style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "JetBrains Mono, monospace" }}>{c.val}</span>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </div>
 

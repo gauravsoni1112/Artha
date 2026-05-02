@@ -1,8 +1,8 @@
 /**
  * TanStack Query hooks for Artha.
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { accounts, admin, goals, ingestion, orchestrator, owners, profile, staticData, transactions } from "@/lib/api";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { accounts, admin, goals, holdings, ingestion, netWorth, orchestrator, owners, profile, staticData, taxData, transactions } from "@/lib/api";
 import type { TransactionFilters } from "@/lib/api";
 import type { RecommendationEventRequest, RecommendationRequest } from "@/lib/types";
 
@@ -62,6 +62,42 @@ export function useCurrentMonthTransactions(ownerId: string | undefined) {
   const now = new Date();
   const dateFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
   return useTransactions(ownerId, { date_from: dateFrom, limit: 500 });
+}
+
+// ── Holdings ──────────────────────────────────────────────────────────────────
+
+export function useHoldings(ownerId: string | undefined) {
+  return useQuery({
+    queryKey: ["holdings", ownerId],
+    queryFn: () => holdings.list(ownerId!),
+    enabled: !!ownerId,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+// ── Net Worth ─────────────────────────────────────────────────────────────────
+
+export function useNetWorth(ownerId: string | undefined) {
+  return useQuery({
+    queryKey: ["net-worth", ownerId],
+    queryFn: () => netWorth.get(ownerId!),
+    enabled: !!ownerId,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+// ── Tax Data ──────────────────────────────────────────────────────────────────
+
+export function useTaxData(ownerId: string | undefined) {
+  return useQuery({
+    queryKey: ["tax-data", ownerId],
+    queryFn: () => taxData.list(ownerId!),
+    enabled: !!ownerId,
+    staleTime: 60_000,
+    retry: 1,
+  });
 }
 
 // ── Goal mutations ────────────────────────────────────────────────────────────
@@ -183,6 +219,128 @@ export function useFamilyMembers(ownerId: string | undefined) {
     staleTime: 60_000,
     retry: 1,
   });
+}
+
+// ── Multi-owner (family) aggregation hooks ────────────────────────────────────
+
+export function useMultiOwnerAccounts(ownerIds: string[]) {
+  const results = useQueries({
+    queries: ownerIds.map((id) => ({
+      queryKey: ["accounts", id],
+      queryFn: () => accounts.list(id),
+      staleTime: 60_000,
+      retry: 1 as const,
+    })),
+  });
+  return {
+    data: results.flatMap((r) => r.data ?? []),
+    isLoading: results.some((r) => r.isLoading),
+  };
+}
+
+export function useMultiOwnerGoals(ownerIds: string[]) {
+  const results = useQueries({
+    queries: ownerIds.map((id) => ({
+      queryKey: ["goals", id],
+      queryFn: () => goals.list(id),
+      staleTime: 60_000,
+      retry: 1 as const,
+    })),
+  });
+  return {
+    data: results.flatMap((r) => r.data ?? []),
+    isLoading: results.some((r) => r.isLoading),
+  };
+}
+
+export function useMultiOwnerTransactions(ownerIds: string[], filters: TransactionFilters = {}) {
+  const results = useQueries({
+    queries: ownerIds.map((id) => ({
+      queryKey: ["transactions", id, filters],
+      queryFn: () => transactions.list(id, filters),
+      staleTime: 60_000,
+      retry: 1 as const,
+    })),
+  });
+  return {
+    data: results
+      .flatMap((r) => r.data ?? [])
+      .sort((a, b) => b.transaction_date.localeCompare(a.transaction_date)),
+    isLoading: results.some((r) => r.isLoading),
+  };
+}
+
+export function useMultiOwnerHoldings(ownerIds: string[]) {
+  const results = useQueries({
+    queries: ownerIds.map((id) => ({
+      queryKey: ["holdings", id],
+      queryFn: () => holdings.list(id),
+      staleTime: 60_000,
+      retry: 1 as const,
+    })),
+  });
+  return {
+    data: results.flatMap((r) => r.data ?? []),
+    isLoading: results.some((r) => r.isLoading),
+  };
+}
+
+export function useMultiOwnerNetWorth(ownerIds: string[]) {
+  const results = useQueries({
+    queries: ownerIds.map((id) => ({
+      queryKey: ["net-worth", id],
+      queryFn: () => netWorth.get(id),
+      staleTime: 60_000,
+      retry: 1 as const,
+    })),
+  });
+  const isLoading = results.some((r) => r.isLoading);
+  const loaded = results.map((r) => r.data).filter(Boolean) as NonNullable<(typeof results)[number]["data"]>[];
+
+  if (loaded.length === 0) return { data: undefined, isLoading };
+
+  const total_assets_paise = loaded.reduce((s, d) => s + d.total_assets_paise, 0);
+  const total_liabilities_paise = loaded.reduce((s, d) => s + d.total_liabilities_paise, 0);
+  const net_worth_paise = total_assets_paise - total_liabilities_paise;
+
+  // Sum net worth per calendar month across all owners, then recompute change fields
+  const monthMap = new Map<string, number>();
+  for (const d of loaded) {
+    for (const h of d.history) {
+      monthMap.set(h.month, (monthMap.get(h.month) ?? 0) + h.net_worth_paise);
+    }
+  }
+  const sortedMonths = Array.from(monthMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const history = sortedMonths.map(([month, nw], i) => {
+    // First entry has no prior month — treat as no change (0) to avoid displaying full NW as a gain
+    const prevNw = i > 0 ? sortedMonths[i - 1][1] : nw;
+    const change_paise = i > 0 ? nw - prevNw : 0;
+    const change_pct = i > 0 && prevNw > 0
+      ? Math.round((change_paise / prevNw) * 1000) / 10
+      : null;
+    return { month, net_worth_paise: nw, change_paise, change_pct };
+  });
+
+  // Sum asset categories and delta by label, recompute percentages
+  const catMap = new Map<string, { value_paise: number; delta_paise: number }>();
+  for (const d of loaded) {
+    for (const a of d.assets_by_category) {
+      const existing = catMap.get(a.label) ?? { value_paise: 0, delta_paise: 0 };
+      catMap.set(a.label, {
+        value_paise: existing.value_paise + a.value_paise,
+        delta_paise: existing.delta_paise + a.delta_paise,
+      });
+    }
+  }
+  const safeTotalAssets = total_assets_paise || 1;
+  const assets_by_category = Array.from(catMap.entries()).map(([label, { value_paise, delta_paise }]) => ({
+    label,
+    value_paise,
+    pct: Math.round((value_paise / safeTotalAssets) * 100),
+    delta_paise,
+  }));
+
+  return { data: { total_assets_paise, total_liabilities_paise, net_worth_paise, history, assets_by_category }, isLoading };
 }
 
 // ── Advisory / History ────────────────────────────────────────────────────────

@@ -131,13 +131,22 @@ class BaseAgent(ABC):
         return (
             f"You are Artha, a personal finance assistant for {user_profile.name}. "
             f"You specialise in {', '.join(self.CAPABILITIES)} analysis. "
-            "Use tools to retrieve real data — never guess amounts. "
-            "For optional parameters (start_date, end_date, category, account_id, etc.): "
-            "only include them if the user specifically asked for those filters. "
-            "If not specified, omit them and let them default to None. "
-            "Express amounts in Indian Rupee format (₹X,XX,XXX.XX). "
-            "Reference fiscal year (April–March) for annual figures. "
-            "Never reveal raw paise values unless explicitly asked."
+            "Use tools to retrieve real data — never guess amounts.\n\n"
+            f"User profile: owner_id={user_profile.owner_id} "
+            f"income={user_profile.total_monthly_income_paise}p/mo "
+            f"risk={user_profile.risk_appetite}\n\n"
+            "Response rules:\n"
+            "- Default date range: current calendar month unless the user specifies otherwise.\n"
+            "- For optional parameters (start_date, end_date, category, account_id, etc.): "
+            "only include them if the user specifically requested that filter; otherwise omit them.\n"
+            "- Always use the arithmetic tools (convert_amount, calculate_percentage, "
+            "calculate_growth, calculate_compound_interest) — never compute amounts inline.\n"
+            "- Express amounts in Indian Rupee format (₹X,XX,XXX.XX).\n"
+            "- Reference fiscal year (April–March) for annual figures.\n"
+            "- If a tool returns no data, explain why and suggest ingesting the relevant document.\n"
+            "- Cite data_freshness when the user asks about current balances.\n"
+            "- Never reveal raw paise values unless explicitly asked.\n"
+            "- Keep answers concise and actionable; lead with the direct answer, then context."
         )
 
     # ------------------------------------------------------------------
@@ -211,15 +220,7 @@ class BaseAgent(ABC):
         system_msg = SystemMessage(content=self._system_prompt(request.user_profile))
         human_msg = HumanMessage(content=request.query)
 
-        profile_context = HumanMessage(
-            content=(
-                f"[User profile] owner_id={request.user_profile.owner_id} "
-                f"income={request.user_profile.total_monthly_income_paise}p/mo "
-                f"risk={request.user_profile.risk_appetite}"
-            )
-        )
-
-        messages = [system_msg, profile_context, human_msg]
+        messages = [system_msg, human_msg]
 
         best_result: dict[str, Any] = {}
         best_confidence: float = 0.0
@@ -247,7 +248,7 @@ class BaseAgent(ABC):
             # avoids a wasted ainvoke and an empty Langfuse span.
             from services.agent.context import CONTEXT_WINDOW_THRESHOLD  # noqa: PLC0415
             if len(messages) > CONTEXT_WINDOW_THRESHOLD:
-                messages, _ = await compact_messages(messages, self._compactor_llm, callbacks=compactor_callbacks)
+                messages, _ = await compact_messages(messages, self._compactor_llm)
 
             iter_meta = {**_lf_meta, "iteration": iteration}
             executor_handler = get_callback_handler(

@@ -29,7 +29,12 @@ async def run(
     end_date: str | None = None,
     fiscal_year: str | None = None,
 ) -> ToolResult:
-    """Analyse spending by category. Returns per-category totals and % of spend."""
+    """Aggregate spending by category for a given period.
+
+    Prefer this over transaction_query when the user asks "how much did I spend on X"
+    or wants a breakdown of spending across categories.
+    Use spending_trend instead when the user asks about trends over time (month-by-month).
+    """
     log.info("tool.category_analysis.start", owner_id=owner_id, fiscal_year=fiscal_year)
 
     with start_span("tool.category_analysis", {"owner_id": owner_id}):

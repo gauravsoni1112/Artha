@@ -25,6 +25,74 @@ export interface Account {
   nickname: string | null;
   is_active: boolean;
   created_at: string;
+  balance_paise: number | null;
+}
+
+// ── Holdings ─────────────────────────────────────────────────────────────────
+
+export interface EquityMeta    { exchange?: "NSE" | "BSE"; broker?: string }
+export interface MutualFundMeta { folio_no?: string; fund_house?: string }
+export interface FdMeta        { maturity_date?: string; rate_pct?: number; bank_name?: string }
+export interface PpfMeta       { account_no?: string; maturity_year?: number; rate_pct?: number }
+export interface NpsMeta       { pran?: string; fund_manager?: string; tier?: "I" | "II" }
+export interface InsuranceMeta { policy_no?: string; sum_assured_paise?: number; annual_premium_paise?: number; maturity_year?: number; policy_type?: string; insurer?: string }
+export interface RealEstateMeta { property_type?: string; address?: string; loan_outstanding_paise?: number }
+export interface GoldMeta      { gold_type?: "PHYSICAL" | "DIGITAL" | "SOVEREIGN_BOND" | "ETF" }
+
+export interface Holding {
+  id: string;
+  account_id: string | null;
+  asset_class: string;
+  instrument_name: string;
+  isin: string | null;
+  units: number | null;
+  nav_paise: number | null;
+  purchase_price_paise: number | null;
+  current_value_paise: number | null;
+  valuation_date: string | null;
+  avg_cost_paise: number | null;
+  pl_paise: number | null;
+  pl_pct: number | null;
+  xirr: number | null;
+  day_change_pct: number | null;
+  metadata: Record<string, unknown> | null;
+}
+
+// ── Net Worth ─────────────────────────────────────────────────────────────────
+
+export interface MonthlyNetWorth {
+  month: string;
+  net_worth_paise: number;
+  change_paise: number;
+  change_pct: number | null;
+}
+
+export interface AssetCategory {
+  label: string;
+  value_paise: number;
+  pct: number;
+  delta_paise: number;
+}
+
+export interface NetWorthResponse {
+  total_assets_paise: number;
+  total_liabilities_paise: number;
+  net_worth_paise: number;
+  history: MonthlyNetWorth[];
+  assets_by_category: AssetCategory[];
+}
+
+// ── Tax Data ──────────────────────────────────────────────────────────────────
+
+export interface TaxDataRecord {
+  id: string;
+  fiscal_year: string;
+  gross_income_paise: number | null;
+  taxable_income_paise: number | null;
+  tax_paid_paise: number | null;
+  tds_paise: number | null;
+  itr_filed: boolean;
+  created_at: string;
 }
 
 export interface FinancialGoal {
@@ -143,6 +211,7 @@ export interface RecommendationResponse {
   warnings: string[];
   gaps: string[];
   final_output: CriticOutput;
+  synthesized_answer?: string;
   plan_json?: PlanJson;
   agent_outputs_json?: DispatchedAgentOutput[];
 }

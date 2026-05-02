@@ -30,12 +30,15 @@ from api.routers.agent import router as agent_router
 from api.routers.agent_router import router as domain_router
 from api.routers.auth import router as auth_router
 from api.routers.goals import router as goals_router
+from api.routers.holdings import router as holdings_router
 from api.routers.ingestion import ingestion_runs_router, router as ingestion_router
+from api.routers.net_worth import router as net_worth_router
 from api.routers.orchestrator import router as orchestrator_router
 from api.routers.owners import router as owners_router
 from api.routers.profile import router as profile_router
 from api.routers.registry import router as registry_router
 from api.routers.static_data import router as static_data_router
+from api.routers.tax_data import router as tax_data_router
 from api.routers.transactions import router as transactions_router
 from libs.telemetry.langfuse_handler import flush as lf_flush
 from libs.telemetry.logging import configure_logging
@@ -111,6 +114,9 @@ app.include_router(auth_router)
 app.include_router(owners_router)
 app.include_router(accounts_router)
 app.include_router(goals_router)
+app.include_router(holdings_router)
+app.include_router(net_worth_router)
+app.include_router(tax_data_router)
 app.include_router(profile_router)
 app.include_router(transactions_router)
 app.include_router(static_data_router)

@@ -12,6 +12,7 @@ Endpoint:
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -33,6 +34,8 @@ from libs.schemas.user_profile import UserProfile
 log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/router", tags=["agent-router"])
+
+_AGENT_SECRET: str = os.getenv("ARTHA_AGENT_SECRET", "dev-agent-secret-change-me")
 
 _DEFAULT_TIMEOUT_S = 30.0
 
@@ -103,6 +106,7 @@ async def _forward_to_agent(
             resp = await client.post(
                 run_url,
                 json=request.model_dump(mode="json"),
+                headers={"X-Artha-Agent-Secret": _AGENT_SECRET},
             )
             resp.raise_for_status()
         except httpx.TimeoutException as exc:

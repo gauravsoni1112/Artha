@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useId } from "react";
 
 interface SparklineProps {
   data: number[];
@@ -8,6 +8,9 @@ interface SparklineProps {
 }
 
 export function Sparkline({ data, color, height = 52, fill = true }: SparklineProps) {
+  // useId ensures gradient IDs are unique per instance, preventing SVG gradient
+  // collisions when multiple Sparklines with the same color appear on the same page.
+  const uid = useId().replace(/:/g, "");
   const w = 300;
   const h = height;
   const min = Math.min(...data);
@@ -21,7 +24,7 @@ export function Sparkline({ data, color, height = 52, fill = true }: SparklinePr
     .map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`)
     .join(" ");
   const area = line + ` L${w},${h} L0,${h} Z`;
-  const gradId = `sg-${color.replace(/[^a-z0-9]/gi, "")}`;
+  const gradId = `sg-${uid}`;
   const last = pts[pts.length - 1];
 
   return (
