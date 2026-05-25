@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any
@@ -51,7 +52,9 @@ from libs.telemetry.tracing import start_span
 from services.agent.config import LLMConfig, LLMRole, RoutingPolicy
 from services.agent.context import compact_messages
 from services.agent.grounding import check_answer_grounding
+from services.agent.metrics import record_reflection_result
 from services.agent.reflection import ReflectionNode
+from services.agents._common.metrics import record_agent_error, record_agent_run
 
 log = structlog.get_logger(__name__)
 
@@ -156,57 +159,69 @@ class BaseAgent(ABC):
     async def run(self, request: AgentRequest) -> AgentResponse:
         """Execute the agent for *request* and return an envelope response."""
         tm = TokenMap()  # per-request token map — GC'd after this method returns
+        _run_t0 = time.perf_counter()
 
-        # Ensure a top-level Langfuse trace exists for this trace_id when the
-        # agent is called directly (i.e. not via the orchestrator, which normally
-        # creates the trace first). Langfuse dedupes on id so this is safe.
-        create_trace(
-            trace_id=str(request.trace_id),
-            name=f"{self.AGENT_ID}.run",
-            user_id=str(request.user_profile.owner_id),
-            input={"query": request.query[:120]},
-            metadata={"agent_id": self.AGENT_ID},
-        )
-
-        with start_span(f"{self.AGENT_ID}.run", {"trace_id": str(request.trace_id)}):
-            log.info(
-                "agent.run.start",
-                agent_id=self.AGENT_ID,
+        # For direct (non-orchestrated) calls, create the root trace here.
+        # When called via the orchestrator, it already owns the trace — creating
+        # another trace with the same id+name would overwrite the root in Langfuse.
+        if not request.orchestrated:
+            create_trace(
                 trace_id=str(request.trace_id),
-                query=request.query[:120],
-            )
-            result, confidence, risk_level, reasoning, warnings, tool_freshness, tools_used = (
-                await self._execute(request, tm)
+                name=f"{self.AGENT_ID}.run",
+                user_id=str(request.user_profile.owner_id),
+                input={"query": request.query[:120]},
+                metadata={"agent_id": self.AGENT_ID},
             )
 
-            # Detokenise final answer if reflector was cloud (tokens may appear in output)
-            if self._reflector_is_cloud and result.get("answer"):
-                result = {**result, "answer": default_anonymiser.detokenise_answer(result["answer"], tm)}
+        try:
+            with start_span(f"{self.AGENT_ID}.run", {"trace_id": str(request.trace_id)}):
+                log.info(
+                    "agent.run.start",
+                    agent_id=self.AGENT_ID,
+                    trace_id=str(request.trace_id),
+                    query=request.query[:120],
+                )
+                result, confidence, risk_level, reasoning, warnings, tool_freshness, tools_used, _iter_count = (
+                    await self._execute(request, tm)
+                )
 
-            data_freshness_hours = _compute_freshness_hours(tool_freshness)
+                # Detokenise final answer if reflector was cloud (tokens may appear in output)
+                if self._reflector_is_cloud and result.get("answer"):
+                    result = {**result, "answer": default_anonymiser.detokenise_answer(result["answer"], tm)}
 
-            response = AgentResponse(
-                agent_id=self.AGENT_ID,
-                schema_version="1.0",
-                trace_id=request.trace_id,
-                data_tier=_tier_from_freshness(data_freshness_hours),
-                data_freshness_hours=data_freshness_hours,
-                result=result,
-                confidence=confidence,
-                risk_level=risk_level,
-                reasoning=reasoning,
-                warnings=warnings,
-                tools_used=tools_used,
-            )
-            log.info(
-                "agent.run.complete",
-                agent_id=self.AGENT_ID,
-                trace_id=str(request.trace_id),
-                confidence=confidence,
-                risk_level=risk_level,
-                reflector_cloud=self._reflector_is_cloud,
-            )
-            return response
+                data_freshness_hours = _compute_freshness_hours(tool_freshness)
+
+                response = AgentResponse(
+                    agent_id=self.AGENT_ID,
+                    schema_version="1.0",
+                    trace_id=request.trace_id,
+                    data_tier=_tier_from_freshness(data_freshness_hours),
+                    data_freshness_hours=data_freshness_hours,
+                    result=result,
+                    confidence=confidence,
+                    risk_level=risk_level,
+                    reasoning=reasoning,
+                    warnings=warnings,
+                    tools_used=tools_used,
+                )
+                log.info(
+                    "agent.run.complete",
+                    agent_id=self.AGENT_ID,
+                    trace_id=str(request.trace_id),
+                    confidence=confidence,
+                    risk_level=risk_level,
+                    reflector_cloud=self._reflector_is_cloud,
+                )
+                record_agent_run(
+                    agent_id=self.AGENT_ID,
+                    duration_seconds=time.perf_counter() - _run_t0,
+                    confidence=confidence,
+                    iterations=_iter_count,
+                )
+                return response
+        except Exception:
+            record_agent_error(self.AGENT_ID)
+            raise
 
     # ------------------------------------------------------------------
     # Internal execution — executor → reflect loop
@@ -214,13 +229,27 @@ class BaseAgent(ABC):
 
     async def _execute(
         self, request: AgentRequest, tm: TokenMap
-    ) -> tuple[dict[str, Any], float, RiskLevel, str, list[str], list[datetime], list[str]]:
+    ) -> tuple[dict[str, Any], float, RiskLevel, str, list[str], list[datetime], list[str], int]:
         owner_id = str(request.user_profile.owner_id)
         graph = self._build_graph(owner_id)
         system_msg = SystemMessage(content=self._system_prompt(request.user_profile))
         human_msg = HumanMessage(content=request.query)
 
-        messages = [system_msg, human_msg]
+        prior_results = request.context.get("prior_results")
+        if prior_results:
+            lines = [
+                "Context from prior agents (use this as ground truth — do NOT call their tools):"
+            ]
+            for dep_agent_id, data in prior_results.items():
+                answer = data.get("answer", "")
+                lines.append(
+                    f"[{dep_agent_id}] {answer}"
+                    if answer
+                    else f"[{dep_agent_id}] Data unavailable."
+                )
+            messages = [system_msg, SystemMessage(content="\n".join(lines)), human_msg]
+        else:
+            messages = [system_msg, human_msg]
 
         best_result: dict[str, Any] = {}
         best_confidence: float = 0.0
@@ -229,6 +258,7 @@ class BaseAgent(ABC):
         tool_freshness: list[datetime] = []
         all_tools_used: list[str] = []
         all_tool_outputs: list[str] = []  # raw tool result strings for grounding check
+        _iter_count: int = 0  # tracks actual reflection iterations completed
 
         _lf_meta = {"agent_id": self.AGENT_ID, "query_preview": request.query[:80]}
         _lf_kwargs = dict(
@@ -309,6 +339,8 @@ class BaseAgent(ABC):
             end_callback_span(executor_handler, output={"answer": raw_answer[:500]})
             end_callback_span(reflector_handler, output={"confidence": confidence, "notes": notes[:200]})
 
+            _iter_count = iteration + 1  # record completed iterations
+
             if confidence >= _REFLECT_THRESHOLD:
                 break
 
@@ -345,6 +377,10 @@ class BaseAgent(ABC):
 
         end_callback_span(compactor_handler)
 
+        # Emit reflection iteration metrics.
+        _hit_max = (_iter_count >= _MAX_REFLECT + 1 and best_confidence < _REFLECT_THRESHOLD)
+        record_reflection_result(iterations=_iter_count, hit_max=_hit_max)
+
         # Numeric grounding check — cap confidence if answer cites ₹ figures
         # that cannot be traced to any tool output (possible hallucination).
         answer_text = best_result.get("answer", "")
@@ -371,7 +407,7 @@ class BaseAgent(ABC):
         # Flush is intentionally omitted here — the orchestrator calls flush()
         # once after all agents complete, avoiding a blocking sync call per agent.
         tools_used = list(dict.fromkeys(all_tools_used))  # deduplicate, preserve order
-        return best_result, best_confidence, risk_level, best_reasoning, all_warnings, tool_freshness, tools_used
+        return best_result, best_confidence, risk_level, best_reasoning, all_warnings, tool_freshness, tools_used, _iter_count
 
     def _prepare_reflection(
         self, messages: list, tm: TokenMap

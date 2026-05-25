@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Protocol
 
+from services.orchestrator.metrics import record_breaker_transition
+
 
 # ---------------------------------------------------------------------------
 # State enum
@@ -139,6 +141,7 @@ class InMemoryBreakerStore:
                 if elapsed >= self._config.open_duration_seconds:
                     entry.state = BreakerState.HALF_OPEN
                     entry.half_open_successes = 0
+                    record_breaker_transition(agent_id, "OPEN", "HALF_OPEN")
                     return True  # allow the probe
                 return False
 
@@ -156,6 +159,7 @@ class InMemoryBreakerStore:
                     entry.failure_count = 0
                     entry.opened_at = None
                     entry.half_open_successes = 0
+                    record_breaker_transition(agent_id, "HALF_OPEN", "CLOSED")
             elif entry.state == BreakerState.CLOSED:
                 entry.failure_count = 0  # reset on any success
 
@@ -168,6 +172,7 @@ class InMemoryBreakerStore:
                 entry.state = BreakerState.OPEN
                 entry.opened_at = datetime.now(timezone.utc)
                 entry.half_open_successes = 0
+                record_breaker_transition(agent_id, "HALF_OPEN", "OPEN")
                 return
 
             if entry.state == BreakerState.CLOSED:
@@ -175,6 +180,7 @@ class InMemoryBreakerStore:
                 if entry.failure_count >= self._config.failure_threshold:
                     entry.state = BreakerState.OPEN
                     entry.opened_at = datetime.now(timezone.utc)
+                    record_breaker_transition(agent_id, "CLOSED", "OPEN")
 
     def reset(self, agent_id: str) -> None:
         with self._lock:

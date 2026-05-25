@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from libs.confidence.metrics import record_composition
 from libs.confidence.tier import TIER_PENALTY, FallbackTier
 
 
@@ -69,4 +70,6 @@ def compose(inputs: list[AgentConfidenceInput]) -> CompositeResult:
             )
 
     score = round(sum(adjusted) / len(adjusted), 2)
+    tier_penalties = [(inp.agent_id, TIER_PENALTY[inp.fallback_tier]) for inp in active]
+    record_composition(gap_count=len(gaps), tier_penalties=tier_penalties, score=score)
     return CompositeResult(score=score, gaps=gaps, warnings=warnings)

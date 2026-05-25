@@ -14,8 +14,10 @@ import os
 from contextlib import contextmanager
 from typing import Generator
 
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -25,18 +27,25 @@ _tracer: trace.Tracer | None = None
 
 
 def configure_tracing(service_name: str = "artha") -> None:
-    """Initialise OTel tracing. Call once at startup."""
+    """Initialise OTel tracing and metrics. Call once at startup."""
     global _tracer
 
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     resource = Resource.create({SERVICE_NAME: service_name})
 
+    # ── Tracing ───────────────────────────────────────────────────────────────
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
     provider.add_span_processor(BatchSpanProcessor(exporter))
-
     trace.set_tracer_provider(provider)
     _tracer = trace.get_tracer(service_name)
+
+    # ── Metrics (Prometheus) ──────────────────────────────────────────────────
+    # PrometheusMetricReader registers all OTel instruments into the default
+    # prometheus_client registry, which is then served at GET /metrics.
+    _prometheus_reader = PrometheusMetricReader()
+    meter_provider = MeterProvider(resource=resource, metric_readers=[_prometheus_reader])
+    metrics.set_meter_provider(meter_provider)
 
 
 def get_tracer() -> trace.Tracer:

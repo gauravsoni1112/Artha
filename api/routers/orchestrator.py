@@ -14,6 +14,7 @@ accessed via FastAPI dependencies.  Override them in tests via dependency_overri
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime
 from typing import Annotated, Any
@@ -47,12 +48,13 @@ from services.orchestrator.audit import (
 from services.orchestrator.breaker import InMemoryBreakerStore
 from services.orchestrator.cache import AgentResponseCache
 from services.orchestrator.critic import evaluate as critic_evaluate
-from services.orchestrator.decompose import RegisteredAgent, decompose
+from services.orchestrator.decompose import RegisteredAgent, decompose, decompose_with_llm_fallback
 from services.orchestrator.synthesizer import synthesize
 from services.orchestrator.dispatch import dispatch_plan
 from services.orchestrator.metrics import (
     record_breaker_state,
     record_dispatch_tier,
+    record_pipeline_stage,
     record_recommendation,
     record_transition,
 )
@@ -235,6 +237,7 @@ async def create_recommendation_endpoint(
         metadata={"owner_id": str(body.owner_id)},
     )
 
+    _e2e_t0 = time.perf_counter()
     with start_span("orchestrator.recommend", {"owner_id": str(body.owner_id), "trace_id": str(trace_id)}):
 
         # 1. Load user profile
@@ -247,19 +250,25 @@ async def create_recommendation_endpoint(
             )
         pydantic_profile, profile_id = result
 
+        _t0 = time.perf_counter()
         with start_span("planner.scope_resolve"):
             members = await _load_scope_members(session, profile_id)
             is_family = query_implies_family(body.query)
             scope = resolve_scope(pydantic_profile, members, query_requests_family=is_family)
+        record_pipeline_stage("scope_resolve", time.perf_counter() - _t0)
 
         # 2. Snapshot
+        _t0 = time.perf_counter()
         with start_span("planner.snapshot"):
             snapshot = await create_snapshot(session, profile_id, pydantic_profile)
+        record_pipeline_stage("snapshot", time.perf_counter() - _t0)
 
         # 3. Decompose
         available_agents: list[RegisteredAgent] = registry.list_available()
+        _t0 = time.perf_counter()
         with start_span("planner.decompose", {"agent_count": str(len(available_agents))}):
-            plan = decompose(body.query, scope, available_agents)
+            plan = await decompose_with_llm_fallback(body.query, scope, available_agents)
+        record_pipeline_stage("decompose", time.perf_counter() - _t0)
 
         log.info(
             "orchestrator.plan_built",
@@ -269,10 +278,12 @@ async def create_recommendation_endpoint(
         )
 
         # 4. Dispatch
+        _t0 = time.perf_counter()
         with start_span("orchestrator.dispatch", {"plan_id": str(plan.plan_id)}):
             dispatched_results = await dispatch_plan(
                 plan, pydantic_profile, registry, breaker, response_cache, trace_id
             )
+        record_pipeline_stage("dispatch", time.perf_counter() - _t0)
 
         # Record tier metrics
         for dr in dispatched_results:
@@ -280,12 +291,16 @@ async def create_recommendation_endpoint(
             record_breaker_state(dr.agent_id, breaker.get_state(dr.agent_id).value)
 
         # 5. Compose baseline confidence
+        _t0 = time.perf_counter()
         confidence_inputs = _build_confidence_inputs(dispatched_results)
         baseline = compose(confidence_inputs)
+        record_pipeline_stage("compose", time.perf_counter() - _t0)
 
         # 6. Critic
+        _t0 = time.perf_counter()
         with start_span("critic.evaluate"):
             critic_result = critic_evaluate(body.query, dispatched_results, baseline)
+        record_pipeline_stage("critic", time.perf_counter() - _t0)
         if lf_trace is not None:
             try:
                 cs = lf_trace.span(
@@ -308,12 +323,15 @@ async def create_recommendation_endpoint(
                 pass
 
         # 7. Synthesize — merge all agent answers into one narrative
+        _t0 = time.perf_counter()
         with start_span("synthesizer.run"):
             synthesized_answer = await synthesize(
                 body.query, dispatched_results, critic_result=critic_result, trace_id=str(trace_id)
             )
+        record_pipeline_stage("synthesize", time.perf_counter() - _t0)
 
         # 8. Audit write
+        _t0 = time.perf_counter()
         with start_span("audit.write"):
             rec = await create_recommendation(
                 session,
@@ -326,6 +344,7 @@ async def create_recommendation_endpoint(
                 synthesized_answer=synthesized_answer,
             )
             await session.commit()
+        record_pipeline_stage("audit_write", time.perf_counter() - _t0)
 
         # Finalise the Langfuse trace with the orchestrator's output summary,
         # then flush so events appear in the dashboard without waiting for the
@@ -357,6 +376,7 @@ async def create_recommendation_endpoint(
             gap_count=len(critic_result.gaps),
             critic_penalty=critic_result.total_penalty,
         )
+        record_pipeline_stage("e2e", time.perf_counter() - _e2e_t0)
 
         log.info(
             "orchestrator.recommendation_complete",

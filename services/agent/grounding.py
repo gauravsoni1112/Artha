@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 
+from services.agent.metrics import record_grounding_check
+
 # ── Amount extraction ──────────────────────────────────────────────────────────
 
 # Matches ₹ amounts in Indian formats:
@@ -81,4 +83,6 @@ def check_answer_grounding(answer: str, tool_outputs: list[str]) -> tuple[bool, 
         if not any(_amounts_close(amt, t) for t in tool_amounts):
             ungrounded.append(amt)
 
-    return len(ungrounded) == 0, ungrounded
+    is_grounded = len(ungrounded) == 0
+    record_grounding_check(is_grounded, len(ungrounded))
+    return is_grounded, ungrounded

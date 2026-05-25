@@ -24,9 +24,12 @@ from typing import Annotated, Type
 
 import structlog
 from fastapi import FastAPI, Header, HTTPException, status
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from libs.schemas.agent_envelope import AgentRequest, AgentResponse
+from libs.telemetry.tracing import configure_tracing
 from services.agents._common.base_agent import BaseAgent
 from services.agents._common.self_register import self_register
 
@@ -54,6 +57,9 @@ def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        # Wire OTel tracing + Prometheus metrics reader for this agent container.
+        configure_tracing(service_name=f"artha.{agent_class.AGENT_ID}")
+
         db_url = os.getenv(
             "DATABASE_URL",
             "postgresql+asyncpg://artha:artha_secret@localhost:5432/artha",
@@ -87,6 +93,11 @@ def make_agent_app(agent_class: Type[BaseAgent]) -> FastAPI:
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "agent_id": agent_class.AGENT_ID}
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint() -> Response:
+        """Prometheus scrape endpoint — exposes all OTel instruments for this agent."""
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/run", response_model=AgentResponse)
     async def run(

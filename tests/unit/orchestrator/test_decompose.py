@@ -94,11 +94,23 @@ def test_sip_increase_query_covers_cashflow_investment_goal():
     assert "goal_agent" in ids, "need goal feasibility"
 
 
-def test_all_steps_parallel_no_depends():
+def test_dependency_wiring_for_goal_query():
+    """goal_agent depends on cashflow + investment; others run first."""
     plan = decompose("Should I increase SIP by ₹10k?", _scope(), ALL_AGENTS)
-    for step in plan.steps:
-        assert step.depends_on == []
-    assert len(plan.parallel_steps()) == len(plan.steps)
+    by_id = {s.agent_id: s for s in plan.steps}
+
+    # Leaf agents have no declared dependencies
+    assert by_id["cashflow_agent"].depends_on == []
+    assert by_id["investment_agent"].depends_on == []
+
+    # goal_agent must wait for its data sources
+    assert set(by_id["goal_agent"].depends_on) == {"cashflow_agent", "investment_agent"}
+
+    # parallel_steps() returns only the dependency-free steps
+    parallel_ids = {s.agent_id for s in plan.parallel_steps()}
+    assert "cashflow_agent" in parallel_ids
+    assert "investment_agent" in parallel_ids
+    assert "goal_agent" not in parallel_ids
 
 
 # ---------------------------------------------------------------------------

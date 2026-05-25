@@ -32,6 +32,7 @@ from typing import Callable
 from libs.confidence.composition import CompositeResult
 from libs.confidence.tier import FallbackTier
 from services.orchestrator.dispatch import DispatchedResult
+from services.orchestrator.metrics import record_critic_flag
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -143,11 +144,17 @@ def _check_numeric_field(
 
 
 def _check_surplus(results: list[DispatchedResult]) -> list[ConsistencyFlag]:
-    return _check_numeric_field(results, "surplus_paise", "surplus_mismatch", "Surplus")
+    flags = _check_numeric_field(results, "surplus_paise", "surplus_mismatch", "Surplus")
+    if flags:
+        record_critic_flag("surplus_mismatch")
+    return flags
 
 
 def _check_net_worth(results: list[DispatchedResult]) -> list[ConsistencyFlag]:
-    return _check_numeric_field(results, "net_worth_paise", "net_worth_mismatch", "Net worth")
+    flags = _check_numeric_field(results, "net_worth_paise", "net_worth_mismatch", "Net worth")
+    if flags:
+        record_critic_flag("net_worth_mismatch")
+    return flags
 
 
 def _check_time_horizon(results: list[DispatchedResult]) -> list[ConsistencyFlag]:
@@ -175,6 +182,7 @@ def _check_time_horizon(results: list[DispatchedResult]) -> list[ConsistencyFlag
     if delta <= 5:
         return []
 
+    record_critic_flag("time_horizon_mismatch")
     return [
         ConsistencyFlag(
             check_type="time_horizon_mismatch",

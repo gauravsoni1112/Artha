@@ -40,6 +40,10 @@ from api.routers.registry import router as registry_router
 from api.routers.static_data import router as static_data_router
 from api.routers.tax_data import router as tax_data_router
 from api.routers.transactions import router as transactions_router
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from api.middleware import PrometheusMiddleware
 from libs.telemetry.langfuse_handler import flush as lf_flush
 from libs.telemetry.logging import configure_logging
 from libs.telemetry.tracing import configure_tracing
@@ -105,6 +109,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(PrometheusMiddleware)
 
 # ── Rate limiting ────────────────────────────────────────────────────
 app.state.limiter = limiter
@@ -132,3 +137,9 @@ app.include_router(orchestrator_router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics() -> Response:
+    """Prometheus scrape endpoint — exposes all OTel instruments."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

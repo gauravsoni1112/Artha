@@ -69,6 +69,58 @@ _breaker_state_gauge = _meter.create_up_down_counter(
 
 _BREAKER_STATE_CODES = {"CLOSED": 0, "OPEN": 1, "HALF_OPEN": 2}
 
+# ---------------------------------------------------------------------------
+# Pipeline stage latency (Commit 2)
+# ---------------------------------------------------------------------------
+
+_pipeline_stage_latency = _meter.create_histogram(
+    "artha_pipeline_stage_duration_seconds",
+    description=(
+        "Wall-clock latency of each orchestrator pipeline stage. "
+        "stage label: scope_resolve | snapshot | decompose | dispatch | "
+        "compose | critic | synthesize | audit_write | e2e"
+    ),
+    unit="s",
+)
+
+# ---------------------------------------------------------------------------
+# Breaker transitions (Commit 4)
+# ---------------------------------------------------------------------------
+
+_breaker_transitions_total = _meter.create_counter(
+    "artha_breaker_transitions_total",
+    description="Count of circuit breaker state transitions per agent",
+)
+
+# ---------------------------------------------------------------------------
+# Decompose path metrics (Commit 5)
+# ---------------------------------------------------------------------------
+
+_decompose_path_total = _meter.create_counter(
+    "artha_decompose_path_total",
+    description="Count of decompose calls by routing path (rule_based or llm_fallback)",
+)
+
+_decompose_cycle_detected_total = _meter.create_counter(
+    "artha_decompose_cycle_detected_total",
+    description="Count of dependency graph cycles detected and rejected by Kahn's algorithm",
+)
+
+_decompose_agent_count = _meter.create_histogram(
+    "artha_decompose_agent_count",
+    description="Number of agents selected per decompose call",
+    unit="count",
+)
+
+# ---------------------------------------------------------------------------
+# Critic per-check flag counters (Commit 7)
+# ---------------------------------------------------------------------------
+
+_critic_check_flagged_total = _meter.create_counter(
+    "artha_critic_check_flagged_total",
+    description="Count of times each critic consistency check flagged an issue",
+)
+
 
 # ---------------------------------------------------------------------------
 # Public recording functions
@@ -100,3 +152,38 @@ def record_transition(from_state: str, to_state: str) -> None:
 def record_breaker_state(agent_id: str, state: str) -> None:
     code = _BREAKER_STATE_CODES.get(state, 0)
     _breaker_state_gauge.add(code, {"agent_id": agent_id})
+
+
+def record_pipeline_stage(stage: str, duration_seconds: float) -> None:
+    """Record wall-clock latency for a named pipeline stage."""
+    _pipeline_stage_latency.record(duration_seconds, {"stage": stage})
+
+
+def record_breaker_transition(agent_id: str, from_state: str, to_state: str) -> None:
+    """Record a circuit breaker state transition."""
+    _breaker_transitions_total.add(
+        1, {"agent_id": agent_id, "from_state": from_state, "to_state": to_state}
+    )
+
+
+def record_decompose_path(path: str) -> None:
+    """Record which decompose path was taken. path: 'rule_based' or 'llm_fallback'."""
+    _decompose_path_total.add(1, {"path": path})
+
+
+def record_decompose_cycle() -> None:
+    """Record a cycle detected (and rejected) in the agent dependency graph."""
+    _decompose_cycle_detected_total.add(1, {})
+
+
+def record_decompose_agent_count(count: int, path: str) -> None:
+    """Record the number of agents selected in a single decompose call."""
+    _decompose_agent_count.record(count, {"path": path})
+
+
+def record_critic_flag(check_type: str) -> None:
+    """Record a critic consistency check that fired a flag.
+
+    check_type: 'surplus_mismatch' | 'net_worth_mismatch' | 'time_horizon_mismatch'
+    """
+    _critic_check_flagged_total.add(1, {"check_type": check_type})
