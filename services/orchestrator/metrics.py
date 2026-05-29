@@ -121,6 +121,30 @@ _critic_check_flagged_total = _meter.create_counter(
     description="Count of times each critic consistency check flagged an issue",
 )
 
+# ---------------------------------------------------------------------------
+# Agent HTTP call latency (dispatch → domain agent) (Commit 8)
+# ---------------------------------------------------------------------------
+
+_agent_http_call_latency = _meter.create_histogram(
+    "artha_agent_http_call_duration_seconds",
+    description="Latency of outbound HTTP calls from the dispatch layer to domain agents",
+    unit="s",
+)
+
+# ---------------------------------------------------------------------------
+# Cache hit / miss counters (Commit 8)
+# ---------------------------------------------------------------------------
+
+_cache_hits_total = _meter.create_counter(
+    "artha_cache_hits_total",
+    description="Count of agent response cache hits (SECONDARY + TERTIARY fallbacks served)",
+)
+
+_cache_misses_total = _meter.create_counter(
+    "artha_cache_misses_total",
+    description="Count of agent response cache misses (no cached entry available)",
+)
+
 
 # ---------------------------------------------------------------------------
 # Public recording functions
@@ -179,6 +203,21 @@ def record_decompose_cycle() -> None:
 def record_decompose_agent_count(count: int, path: str) -> None:
     """Record the number of agents selected in a single decompose call."""
     _decompose_agent_count.record(count, {"path": path})
+
+
+def record_agent_http_call(agent_id: str, duration_seconds: float) -> None:
+    """Record the latency of one outbound HTTP call to a domain agent's /run endpoint."""
+    _agent_http_call_latency.record(duration_seconds, {"agent_id": agent_id})
+
+
+def record_cache_hit(agent_id: str, tier: str) -> None:
+    """Record a cache hit — a SECONDARY or TERTIARY fallback response was served."""
+    _cache_hits_total.add(1, {"agent_id": agent_id, "tier": tier})
+
+
+def record_cache_miss(agent_id: str) -> None:
+    """Record a cache miss — no usable cached response was found for this agent."""
+    _cache_misses_total.add(1, {"agent_id": agent_id})
 
 
 def record_critic_flag(check_type: str) -> None:

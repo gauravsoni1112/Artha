@@ -55,6 +55,7 @@ from services.agent.grounding import check_answer_grounding
 from services.agent.metrics import record_reflection_result
 from services.agent.reflection import ReflectionNode
 from services.agents._common.metrics import record_agent_error, record_agent_run
+from services.agents._common.metrics_callback import MetricsCallbackHandler
 
 log = structlog.get_logger(__name__)
 
@@ -293,8 +294,13 @@ class BaseAgent(ABC):
                 metadata=iter_meta,
                 node_name=f"reflector#iter{iteration}",
             )
-            executor_callbacks = [executor_handler] if executor_handler is not None else []
-            reflector_callbacks = [reflector_handler] if reflector_handler is not None else []
+            _metrics_cb = MetricsCallbackHandler.make(self.AGENT_ID)
+            executor_callbacks = [_metrics_cb]
+            if executor_handler is not None:
+                executor_callbacks.append(executor_handler)
+            reflector_callbacks = []
+            if reflector_handler is not None:
+                reflector_callbacks.append(reflector_handler)
 
             graph_state = await graph.ainvoke(
                 {"messages": messages},

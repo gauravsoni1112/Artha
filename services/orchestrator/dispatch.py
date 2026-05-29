@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -36,6 +37,7 @@ from libs.schemas.agent_envelope import AgentRequest, AgentResponse
 from libs.schemas.user_profile import UserProfile
 from services.orchestrator.breaker import BreakerStore, InMemoryBreakerStore
 from services.orchestrator.cache import AgentResponseCache
+from services.orchestrator.metrics import record_agent_http_call, record_cache_hit, record_cache_miss
 from services.orchestrator.plan import AgentCall, Plan
 from services.orchestrator.registry import AgentRegistryCache
 
@@ -123,9 +125,11 @@ async def _dispatch_one(
 
     # 3. Live call
     try:
+        _t0 = time.perf_counter()
         response = await _call_agent_http(
             entry.endpoint, agent_request, entry.timeout_ms
         )
+        record_agent_http_call(agent_id, time.perf_counter() - _t0)
         breaker_store.record_success(agent_id)
         await response_cache.set(
             agent_id, agent_request, response, float(entry.cache_ttl_hours)
@@ -145,6 +149,7 @@ async def _dispatch_one(
         cached = await response_cache.get(agent_id, agent_request)
         if cached is not None:
             tier = cached.tier()
+            record_cache_hit(agent_id, tier.value)
             log.info("dispatch.cache_fallback", agent_id=agent_id, tier=tier)
             return DispatchedResult(
                 agent_id=agent_id,
@@ -152,6 +157,7 @@ async def _dispatch_one(
                 fallback_tier=tier,
             )
 
+        record_cache_miss(agent_id)
         return DispatchedResult(
             agent_id=agent_id,
             response=None,

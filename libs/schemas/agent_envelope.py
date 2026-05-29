@@ -72,6 +72,10 @@ class AgentRequest(BaseModel):
     request_timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    orchestrated: bool = Field(
+        default=False,
+        description="True when called from the orchestrator — suppresses agent-owned trace creation",
+    )
 
 
 # ---------------------------------------------------------------------------

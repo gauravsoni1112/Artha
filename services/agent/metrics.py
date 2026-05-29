@@ -46,6 +46,17 @@ _reflection_max_hit_total = _meter.create_counter(
     ),
 )
 
+_llm_call_latency = _meter.create_histogram(
+    "artha_llm_call_duration_seconds",
+    description="Latency of individual LLM API calls inside agent execution",
+    unit="s",
+)
+
+_langfuse_export_errors_total = _meter.create_counter(
+    "artha_langfuse_export_errors_total",
+    description="Count of errors while exporting spans/traces/scores to Langfuse",
+)
+
 
 # ---------------------------------------------------------------------------
 # Public recording functions
@@ -58,6 +69,16 @@ def record_grounding_check(passed: bool, ungrounded_count: int = 0) -> None:
     _grounding_checks_total.add(1, {"outcome": outcome})
     if not passed and ungrounded_count > 0:
         _grounding_ungrounded_count.record(ungrounded_count, {})
+
+
+def record_llm_call(agent_id: str, model: str, duration_seconds: float) -> None:
+    """Record the wall-clock latency of a single LLM API call."""
+    _llm_call_latency.record(duration_seconds, {"agent_id": agent_id, "model": model})
+
+
+def record_langfuse_export_error(operation: str) -> None:
+    """Increment the Langfuse export error counter for the named operation."""
+    _langfuse_export_errors_total.add(1, {"operation": operation})
 
 
 def record_reflection_result(iterations: int, hit_max: bool) -> None:

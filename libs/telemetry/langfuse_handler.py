@@ -46,6 +46,14 @@ log = structlog.get_logger(__name__)
 _client: Any = None
 _client_ready: bool = False
 
+
+def _record_export_error(operation: str) -> None:
+    try:
+        from services.agent.metrics import record_langfuse_export_error  # noqa: PLC0415
+        record_langfuse_export_error(operation)
+    except Exception:
+        pass
+
 # Truncate serialised string fields to this length to keep payloads small.
 _PAYLOAD_MAX_CHARS: int = int(os.getenv("LANGFUSE_PAYLOAD_MAX_CHARS", "4096"))
 
@@ -181,15 +189,15 @@ class _LangfuseCallbackHandler:
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        model_name = (
+            serialized.get("kwargs", {}).get("model_name")
+            or serialized.get("kwargs", {}).get("model")
+            or (serialized.get("id") or ["unknown"])[-1]
+        )
         span = self._ensure_span()
         if span is None:
             return
         try:
-            model_name = (
-                serialized.get("kwargs", {}).get("model_name")
-                or serialized.get("kwargs", {}).get("model")
-                or (serialized.get("id") or ["unknown"])[-1]
-            )
             gen = span.generation(
                 id=str(run_id),
                 name=model_name,
@@ -199,6 +207,7 @@ class _LangfuseCallbackHandler:
             self._generations[str(run_id)] = gen
         except Exception as exc:
             log.warning("langfuse.on_chat_model_start_error", error=str(exc))
+            _record_export_error("on_chat_model_start")
 
     def on_llm_start(
         self,
@@ -208,11 +217,11 @@ class _LangfuseCallbackHandler:
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
+        model_name = (serialized.get("id") or ["unknown"])[-1]
         span = self._ensure_span()
         if span is None:
             return
         try:
-            model_name = (serialized.get("id") or ["unknown"])[-1]
             gen = span.generation(
                 id=str(run_id),
                 name=model_name,
@@ -222,6 +231,7 @@ class _LangfuseCallbackHandler:
             self._generations[str(run_id)] = gen
         except Exception as exc:
             log.warning("langfuse.on_llm_start_error", error=str(exc))
+            _record_export_error("on_llm_start")
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
         try:
@@ -262,6 +272,7 @@ class _LangfuseCallbackHandler:
             gen.end(output=output_text, usage=usage)
         except Exception as exc:
             log.warning("langfuse.on_llm_end_error", error=str(exc))
+            _record_export_error("on_llm_end")
 
     def on_llm_error(self, error: Any, *, run_id: UUID, **kwargs: Any) -> None:
         try:
@@ -270,6 +281,7 @@ class _LangfuseCallbackHandler:
                 gen.end(level="ERROR", status_message=str(error))
         except Exception as exc:
             log.warning("langfuse.on_llm_error_error", error=str(exc))
+            _record_export_error("on_llm_error")
 
     # ── Tool callbacks ────────────────────────────────────────────────────────
 
@@ -294,6 +306,7 @@ class _LangfuseCallbackHandler:
             self._tool_spans[str(run_id)] = tool_span
         except Exception as exc:
             log.warning("langfuse.on_tool_start_error", error=str(exc))
+            _record_export_error("on_tool_start")
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         try:
@@ -302,6 +315,7 @@ class _LangfuseCallbackHandler:
                 tool_span.end(output=_serialize(output))
         except Exception as exc:
             log.warning("langfuse.on_tool_end_error", error=str(exc))
+            _record_export_error("on_tool_end")
 
     def on_tool_error(self, error: Any, *, run_id: UUID, **kwargs: Any) -> None:
         try:
@@ -310,6 +324,7 @@ class _LangfuseCallbackHandler:
                 tool_span.end(level="ERROR", status_message=str(error))
         except Exception as exc:
             log.warning("langfuse.on_tool_error_error", error=str(exc))
+            _record_export_error("on_tool_error")
 
 
 def get_callback_handler(
@@ -374,6 +389,7 @@ def score_trace(trace_id: str, name: str, value: float, comment: str | None = No
         )
     except Exception as exc:
         log.warning("langfuse.score_trace_error", trace_id=trace_id, name=name, error=str(exc))
+        _record_export_error("score_trace")
 
 
 def create_trace(
@@ -405,6 +421,7 @@ def create_trace(
         )
     except Exception as exc:
         log.warning("langfuse.trace_create_error", error=str(exc))
+        _record_export_error("create_trace")
         return None
 
 
@@ -422,3 +439,4 @@ def flush() -> None:
         client.flush()
     except Exception as exc:
         log.warning("langfuse.flush_error", error=str(exc))
+        _record_export_error("flush")
