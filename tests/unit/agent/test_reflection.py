@@ -6,7 +6,6 @@ All LLM calls are mocked — no API key or Docker required.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +15,7 @@ from services.agent.reflection import (
     REFLECTION_THRESHOLD,
     ReflectionNode,
     ReflectionResult,
+    _LLMReflection,
 )
 
 
@@ -34,79 +34,36 @@ def test_fallback_factory():
     assert r.needs_rerun is False
 
 
-# ── ReflectionNode._parse ─────────────────────────────────────────────────────
+# ── _LLMReflection schema ─────────────────────────────────────────────────────
 
-def _make_node() -> ReflectionNode:
-    return ReflectionNode(llm=MagicMock())
-
-
-def test_parse_valid_high_confidence():
-    node = _make_node()
-    payload = json.dumps({
-        "confidence_score": 0.95,
-        "is_complete": True,
-        "reflection_notes": "Answer is complete.",
-    })
-    result = node._parse(payload)
-    assert result.confidence_score == 0.95
-    assert result.is_complete is True
-    assert result.needs_rerun is False
+def test_llm_reflection_rejects_score_above_1():
+    with pytest.raises(Exception):
+        _LLMReflection(confidence_score=1.5, is_complete=True, reflection_notes="")
 
 
-def test_parse_valid_low_confidence():
-    node = _make_node()
-    payload = json.dumps({
-        "confidence_score": 0.4,
-        "is_complete": False,
-        "reflection_notes": "Missing Q2 data.",
-    })
-    result = node._parse(payload)
-    assert result.confidence_score == 0.4
-    assert result.is_complete is False
-    # needs_rerun is set by acall(), not _parse()
-    assert result.needs_rerun is False
+def test_llm_reflection_rejects_score_below_0():
+    with pytest.raises(Exception):
+        _LLMReflection(confidence_score=-0.1, is_complete=False, reflection_notes="bad")
 
 
-def test_parse_clamps_score_above_1():
-    node = _make_node()
-    payload = json.dumps({"confidence_score": 1.5, "is_complete": True, "reflection_notes": ""})
-    result = node._parse(payload)
-    assert result.confidence_score == 1.0
+def test_llm_reflection_valid():
+    r = _LLMReflection(confidence_score=0.8, is_complete=True, reflection_notes="Good.")
+    assert r.confidence_score == 0.8
 
 
-def test_parse_clamps_score_below_0():
-    node = _make_node()
-    payload = json.dumps({"confidence_score": -0.3, "is_complete": False, "reflection_notes": "bad"})
-    result = node._parse(payload)
-    assert result.confidence_score == 0.0
+# ── ReflectionNode mock helpers ───────────────────────────────────────────────
 
+def _make_node(llm_output: _LLMReflection | None = None, raises: Exception | None = None) -> ReflectionNode:
+    mock_llm = MagicMock()
+    mock_structured = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_structured
+    if raises is not None:
+        mock_structured.ainvoke = AsyncMock(side_effect=raises)
+    else:
+        out = llm_output or _LLMReflection(confidence_score=0.9, is_complete=True, reflection_notes="Complete.")
+        mock_structured.ainvoke = AsyncMock(return_value=out)
+    return ReflectionNode(llm=mock_llm)
 
-def test_parse_empty_string_returns_fallback():
-    node = _make_node()
-    result = node._parse("")
-    assert result.confidence_score == 0.5
-    assert result.needs_rerun is False
-
-
-def test_parse_invalid_json_returns_fallback():
-    node = _make_node()
-    result = node._parse("{not json}")
-    assert result.confidence_score == 0.5
-
-
-def test_parse_json_in_markdown_fences():
-    node = _make_node()
-    content = (
-        "```json\n"
-        '{"confidence_score": 0.8, "is_complete": true, "reflection_notes": "Good."}\n'
-        "```"
-    )
-    result = node._parse(content)
-    assert result.confidence_score == 0.8
-    assert result.is_complete is True
-
-
-# ── ReflectionNode.acall (async) ──────────────────────────────────────────────
 
 def _ai_msg(content: str):
     m = MagicMock()
@@ -121,18 +78,11 @@ def _human_msg(content: str):
     return HumanMessage(content=content)
 
 
+# ── ReflectionNode.acall (async) ──────────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_acall_high_confidence_no_rerun():
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = json.dumps({
-        "confidence_score": 0.9,
-        "is_complete": True,
-        "reflection_notes": "Complete answer.",
-    })
-    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
-
-    node = ReflectionNode(llm=mock_llm)
+    node = _make_node(_LLMReflection(confidence_score=0.9, is_complete=True, reflection_notes="Complete answer."))
     state = {
         "messages": [
             _human_msg("[owner_id=abc] What is my net worth?"),
@@ -148,16 +98,7 @@ async def test_acall_high_confidence_no_rerun():
 
 @pytest.mark.asyncio
 async def test_acall_low_confidence_triggers_rerun():
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = json.dumps({
-        "confidence_score": 0.3,
-        "is_complete": False,
-        "reflection_notes": "Q2 data missing.",
-    })
-    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
-
-    node = ReflectionNode(llm=mock_llm)
+    node = _make_node(_LLMReflection(confidence_score=0.3, is_complete=False, reflection_notes="Q2 data missing."))
     state = {
         "messages": [
             _human_msg("Compare Q1 vs Q2 spending"),
@@ -172,17 +113,12 @@ async def test_acall_low_confidence_triggers_rerun():
 
 @pytest.mark.asyncio
 async def test_acall_below_threshold_but_complete_triggers_rerun():
-    """Score below REFLECTION_THRESHOLD should trigger rerun even if is_complete=True."""
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = json.dumps({
-        "confidence_score": 0.4,
-        "is_complete": True,  # LLM says complete but score is well below threshold
-        "reflection_notes": "Answer present but time range not confirmed.",
-    })
-    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
-
-    node = ReflectionNode(llm=mock_llm)
+    """Score below REFLECTION_THRESHOLD triggers rerun even if is_complete=True."""
+    node = _make_node(_LLMReflection(
+        confidence_score=0.4,
+        is_complete=True,
+        reflection_notes="Answer present but time range not confirmed.",
+    ))
     state = {
         "messages": [
             _human_msg("What did I spend last month?"),
@@ -198,49 +134,57 @@ async def test_acall_below_threshold_but_complete_triggers_rerun():
 @pytest.mark.asyncio
 async def test_acall_max_iterations_stops_rerun():
     """After MAX_REFLECT_ITERATIONS, needs_rerun is always False."""
-    mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = json.dumps({
-        "confidence_score": 0.2,
-        "is_complete": False,
-        "reflection_notes": "Still incomplete.",
-    })
-    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
-
-    node = ReflectionNode(llm=mock_llm)
+    node = _make_node(_LLMReflection(confidence_score=0.2, is_complete=False, reflection_notes="Still incomplete."))
     state = {
         "messages": [_human_msg("Question"), _ai_msg("Incomplete answer.")],
-        "reflect_count": MAX_REFLECT_ITERATIONS,  # already at max
+        "reflect_count": MAX_REFLECT_ITERATIONS,
     }
     result = await node.acall(state)
-    assert result["needs_rerun"] is False  # exhausted iterations
+    assert result["needs_rerun"] is False
 
 
 @pytest.mark.asyncio
 async def test_acall_empty_messages_uses_fallback():
     mock_llm = MagicMock()
-    mock_llm.ainvoke = AsyncMock()  # should not be called
+    mock_structured = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_structured
+    mock_structured.ainvoke = AsyncMock()
 
     node = ReflectionNode(llm=mock_llm)
     result = await node.acall({"messages": [], "reflect_count": 0})
     assert result["confidence_score"] == 0.5
     assert result["needs_rerun"] is False
-    mock_llm.ainvoke.assert_not_called()
+    mock_structured.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_acall_llm_error_uses_fallback():
+    node = _make_node(raises=ValueError("LLM unavailable"))
+    state = {
+        "messages": [
+            _human_msg("What is my balance?"),
+            _ai_msg("Your balance is ₹10,000."),
+        ],
+        "reflect_count": 0,
+    }
+    result = await node.acall(state)
+    assert result["confidence_score"] == 0.5
+    assert result["needs_rerun"] is False
 
 
 @pytest.mark.asyncio
 async def test_acall_uses_first_human_message_as_question():
-    """The first HumanMessage (plain user query) is used verbatim as the question."""
-    captured_prompts = []
+    """The first HumanMessage is used as the question in the reflection prompt."""
+    captured_prompts: list = []
 
     async def mock_ainvoke(prompts, **kwargs):
         captured_prompts.extend(prompts)
-        m = MagicMock()
-        m.content = json.dumps({"confidence_score": 0.9, "is_complete": True, "reflection_notes": ""})
-        return m
+        return _LLMReflection(confidence_score=0.9, is_complete=True, reflection_notes="")
 
     mock_llm = MagicMock()
-    mock_llm.ainvoke = mock_ainvoke
+    mock_structured = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_structured
+    mock_structured.ainvoke = mock_ainvoke
 
     node = ReflectionNode(llm=mock_llm)
     state = {

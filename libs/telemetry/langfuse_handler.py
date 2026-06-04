@@ -263,13 +263,43 @@ class _LangfuseCallbackHandler:
                     pass
 
             output_text: Any = None
+            tool_calls_data: Any = None
             if response.generations:
                 first = response.generations[0]
                 if first:
                     g = first[0]
-                    output_text = getattr(g, "text", None) or _serialize(g)
+                    output_text = getattr(g, "text", None) or None
 
-            gen.end(output=output_text, usage=usage)
+                    msg = getattr(g, "message", None)
+                    if msg is not None:
+                        # Capture structured tool-call decisions (name + args) for audit
+                        raw_calls = getattr(msg, "tool_calls", None)
+                        if raw_calls:
+                            tool_calls_data = _serialize(raw_calls)
+
+                        # Capture Claude extended-thinking blocks if present
+                        content_blocks = getattr(msg, "content", None)
+                        if isinstance(content_blocks, list):
+                            thinking_text = "\n\n".join(
+                                b.get("thinking", "")
+                                for b in content_blocks
+                                if isinstance(b, dict) and b.get("type") == "thinking"
+                            )
+                            if thinking_text:
+                                output_text = (
+                                    f"[thinking]\n{thinking_text}\n\n{output_text}"
+                                    if output_text
+                                    else f"[thinking]\n{thinking_text}"
+                                )
+
+                    if output_text is None:
+                        output_text = _serialize(g)
+
+            gen.end(
+                output=output_text,
+                usage=usage,
+                metadata={"tool_calls": tool_calls_data} if tool_calls_data else None,
+            )
         except Exception as exc:
             log.warning("langfuse.on_llm_end_error", error=str(exc))
             _record_export_error("on_llm_end")

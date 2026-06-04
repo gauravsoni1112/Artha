@@ -17,12 +17,12 @@ reflection_notes columns added in migration 0003.
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
 log = structlog.get_logger(__name__)
 
@@ -32,33 +32,13 @@ REFLECTION_THRESHOLD: float = float(os.getenv("REFLECTION_THRESHOLD", "0.7"))
 MAX_REFLECT_ITERATIONS: int = int(os.getenv("MAX_REFLECT_ITERATIONS", "2"))
 
 
-def _extract_json_object(text: str) -> str | None:
-    """Return the first balanced JSON object from *text*, or None."""
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape_next = False
-    for i, ch in enumerate(text[start:], start):
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == "\\" and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
+class _LLMReflection(BaseModel):
+    """Schema for the structured output returned by the reflection LLM."""
+
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    is_complete: bool
+    reflection_notes: str
+
 
 _REFLECTION_SYSTEM = """\
 You are a financial answer quality evaluator.
@@ -149,6 +129,7 @@ class ReflectionNode:
 
     def __init__(self, llm: Any) -> None:
         self._llm = llm
+        self._structured_llm = llm.with_structured_output(_LLMReflection)
 
     async def acall(self, state: dict, **kwargs) -> dict:
         messages = state.get("messages", [])
@@ -209,30 +190,13 @@ class ReflectionNode:
         ]
         try:
             lf_config = {"callbacks": callbacks} if callbacks else {}
-            response = await self._llm.ainvoke(prompt, config=lf_config)
-            return self._parse(response.content)
+            parsed: _LLMReflection = await self._structured_llm.ainvoke(prompt, config=lf_config)
+            return ReflectionResult(
+                confidence_score=parsed.confidence_score,
+                is_complete=parsed.is_complete,
+                reflection_notes=parsed.reflection_notes,
+                needs_rerun=False,
+            )
         except Exception as exc:
             log.warning("reflection.llm_error", error=str(exc))
             return ReflectionResult.fallback()
-
-    def _parse(self, content: str) -> ReflectionResult:
-        for candidate in (content.strip(), _extract_json_object(content)):
-            if not candidate:
-                continue
-            try:
-                data = json.loads(candidate)
-                score = float(data.get("confidence_score", 0.5))
-                score = max(0.0, min(1.0, score))  # clamp to [0, 1]
-                is_complete = bool(data.get("is_complete", True))
-                notes = str(data.get("reflection_notes", ""))
-                # needs_rerun is set by acall() after checking reflect_count
-                return ReflectionResult(
-                    confidence_score=score,
-                    is_complete=is_complete,
-                    reflection_notes=notes,
-                    needs_rerun=False,
-                )
-            except Exception:
-                continue
-        log.warning("reflection.parse_error", raw=content[:200])
-        return ReflectionResult.fallback()

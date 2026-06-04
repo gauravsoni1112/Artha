@@ -19,7 +19,6 @@ step the planner just passes it through, so simple queries remain fast.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import structlog
@@ -27,39 +26,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 log = structlog.get_logger(__name__)
-
-
-def _extract_json_object(text: str) -> str | None:
-    """Return the first balanced JSON object from *text*, or None.
-
-    Counts braces correctly so greedy regex cannot match across unrelated
-    braces in surrounding prose or markdown fences.
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape_next = False
-    for i, ch in enumerate(text[start:], start):
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == "\\" and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
 
 # ── Plan schema ───────────────────────────────────────────────────────────────
 
@@ -73,11 +39,26 @@ class Plan(BaseModel):
     reasoning: str = Field(
         description="Why this decomposition is needed for the original question.",
     )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence that this decomposition correctly captures the user's intent (0–1).",
+    )
+    confidence_reason: str = Field(
+        default="",
+        description="Brief explanation of the confidence score — what is ambiguous or uncertain, if anything.",
+    )
 
     @classmethod
     def trivial(cls, question: str) -> "Plan":
         """Single-step plan — used for simple questions that need no decomposition."""
-        return cls(steps=[question], reasoning="Single-step question; no decomposition needed.")
+        return cls(
+            steps=[question],
+            reasoning="Single-step question; no decomposition needed.",
+            confidence=1.0,
+            confidence_reason="Unambiguous single-step query.",
+        )
 
 
 # ── Planner prompt ────────────────────────────────────────────────────────────
@@ -89,7 +70,9 @@ requires multiple information-gathering steps.
 Output ONLY valid JSON matching this schema (no markdown, no explanation):
 {
   "steps": ["<sub-question or action 1>", "<sub-question or action 2>", ...],
-  "reasoning": "<why you decomposed it this way>"
+  "reasoning": "<why you decomposed it this way>",
+  "confidence": <float 0.0–1.0>,
+  "confidence_reason": "<what is ambiguous or uncertain; 'Unambiguous query.' if nothing>"
 }
 
 Rules:
@@ -112,18 +95,25 @@ Rules:
   available through the tools above.
 - Maximum 4 steps.
 
+Confidence scoring guide:
+  1.0 — Query is unambiguous; the decomposition is the only sensible one.
+  0.8 — Query is mostly clear; one minor ambiguity (e.g. which month to use).
+  0.6 — Query is partially ambiguous; an assumption was required (e.g. "this year" vs fiscal year).
+  0.4 — Query is vague or uses jargon that required interpretation.
+  0.2 — Query is too open-ended; this decomposition is a best guess.
+
 Examples:
 Simple query → 1 step:
   Q: "What did I spend on food this month?"
-  {"steps": ["What did I spend on food this month?"], "reasoning": "Single category lookup."}
+  {"steps": ["What did I spend on food this month?"], "reasoning": "Single category lookup.", "confidence": 1.0, "confidence_reason": "Unambiguous query."}
 
 Multi-step query → 2 steps:
   Q: "How does my spending compare to last month?"
-  {"steps": ["What was my category spending this month?", "What was my category spending last month?"], "reasoning": "Comparison requires two separate period queries."}
+  {"steps": ["What was my category spending this month?", "What was my category spending last month?"], "reasoning": "Comparison requires two separate period queries.", "confidence": 1.0, "confidence_reason": "Unambiguous comparison; both periods are well-defined."}
 
-Multi-domain query → 3 steps:
+Multi-domain query → 3 steps (with ambiguity):
   Q: "Am I saving enough for retirement?"
-  {"steps": ["What is my progress toward savings goals?", "What is my current net worth?", "What is my 6-month spending trend?"], "reasoning": "Retirement readiness needs goals, net worth, and spending trajectory."}
+  {"steps": ["What is my progress toward savings goals?", "What is my current net worth?", "What is my 6-month spending trend?"], "reasoning": "Retirement readiness needs goals, net worth, and spending trajectory.", "confidence": 0.6, "confidence_reason": "Assumed 'saving enough' means goal progress + net worth; no explicit retirement goal may exist."}
 """
 
 
@@ -140,6 +130,7 @@ class PlannerNode:
 
     def __init__(self, llm: Any) -> None:
         self._llm = llm
+        self._structured_llm = llm.with_structured_output(Plan)
 
     def __call__(self, state: dict) -> dict:
         """Synchronous node callable for LangGraph (sync graph compile)."""
@@ -171,8 +162,11 @@ class PlannerNode:
             SystemMessage(content=_PLANNER_SYSTEM),
             HumanMessage(content=question),
         ]
-        response = self._llm.invoke(prompt)
-        return self._parse_response(response.content, question)
+        try:
+            return self._structured_llm.invoke(prompt)
+        except Exception as exc:
+            log.warning("planner.parse_failed", error=str(exc))
+            return Plan.trivial(question)
 
     async def _aplan(self, question: str, callbacks: list | None = None) -> Plan:
         prompt = [
@@ -180,19 +174,8 @@ class PlannerNode:
             HumanMessage(content=question),
         ]
         lf_config = {"callbacks": callbacks} if callbacks else {}
-        response = await self._llm.ainvoke(prompt, config=lf_config)
-        return self._parse_response(response.content, question)
-
-    def _parse_response(self, content: str, original_question: str) -> Plan:
-        """Parse JSON from LLM output, falling back to a trivial plan on error."""
-        # Try clean JSON first, then balanced-brace extraction
-        for candidate in (content.strip(), _extract_json_object(content)):
-            if not candidate:
-                continue
-            try:
-                data = json.loads(candidate)
-                return Plan(**data)
-            except Exception:
-                continue
-        log.warning("planner.parse_failed", raw=content[:200])
-        return Plan.trivial(original_question)
+        try:
+            return await self._structured_llm.ainvoke(prompt, config=lf_config)
+        except Exception as exc:
+            log.warning("planner.parse_failed", error=str(exc))
+            return Plan.trivial(question)
