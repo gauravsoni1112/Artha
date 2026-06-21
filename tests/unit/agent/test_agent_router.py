@@ -11,16 +11,24 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from services.agent.schemas import AgentAnswer
+
 
 OWNER_ID = str(uuid.uuid4())
 SESSION_ID = str(uuid.uuid4())
 
 
+def _make_agent_answer(response: str = "You spent ₹5,000 on groceries last month.") -> AgentAnswer:
+    return AgentAnswer(answer=response, confidence=0.9)
+
+
 @pytest.fixture
 def mock_agent_result():
     """Mock successful agent response."""
+    answer = _make_agent_answer()
     return {
-        "response": "You spent ₹5,000 on groceries last month.",
+        "agent_answer": answer,
+        "response": answer.answer,
         "tool_calls": ["transaction_query"],
         "messages": [
             {"type": "human", "content": "[owner_id=test] What did I spend?"},
@@ -122,8 +130,10 @@ async def test_chat_with_session_id(async_client, mock_agent_result):
 @pytest.mark.asyncio
 async def test_chat_tool_calls_returned(async_client):
     """Tool calls from agent are included in response."""
+    answer = _make_agent_answer("Here's your data...")
     result_with_multiple_tools = {
-        "response": "Here's your data...",
+        "agent_answer": answer,
+        "response": answer.answer,
         "tool_calls": ["transaction_query", "category_analysis", "net_worth"],
         "messages": [],
         "session_id": str(uuid.uuid4()),
@@ -219,8 +229,10 @@ async def test_chat_message_in_response_matches_request(async_client, mock_agent
 @pytest.mark.asyncio
 async def test_chat_account_query_uses_fetch_accounts_tool(async_client):
     """Account-related queries trigger fetch_accounts tool."""
+    answer = _make_agent_answer("You have 3 accounts: HDFC Bank Savings, ICICI Credit Card, Zerodha Investment.")
     result_with_fetch_accounts = {
-        "response": "You have 3 accounts: HDFC Bank Savings, ICICI Credit Card, Zerodha Investment.",
+        "agent_answer": answer,
+        "response": answer.answer,
         "tool_calls": ["fetch_accounts"],
         "messages": [],
         "session_id": str(uuid.uuid4()),
@@ -243,8 +255,10 @@ async def test_chat_account_query_uses_fetch_accounts_tool(async_client):
 @pytest.mark.asyncio
 async def test_chat_transaction_search_with_account_uses_both_tools(async_client):
     """Transaction search in specific account uses fetch_accounts then transaction_query."""
+    answer = _make_agent_answer("Found 5 transactions in your HDFC account totaling ₹15,000.")
     result_with_both_tools = {
-        "response": "Found 5 transactions in your HDFC account totaling ₹15,000.",
+        "agent_answer": answer,
+        "response": answer.answer,
         "tool_calls": ["fetch_accounts", "transaction_query"],
         "messages": [],
         "session_id": str(uuid.uuid4()),

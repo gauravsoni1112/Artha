@@ -88,9 +88,20 @@ def test_agent_answer_supporting_data_round_trip():
 OWNER_ID = str(uuid.uuid4())
 
 
-def _mock_result(confidence: float = 0.9, scratchpad: list | None = None) -> dict:
+def _mock_result(
+    confidence: float = 0.9,
+    scratchpad: list | None = None,
+    reasoning_steps: list[str] | None = None,
+) -> dict:
+    answer = AgentAnswer(
+        answer="You spent ₹5,000 on groceries.",
+        confidence=confidence,
+        reasoning_steps=reasoning_steps or [],
+        supporting_data=[],
+    )
     return {
-        "response": "You spent ₹5,000 on groceries.",
+        "agent_answer": answer,
+        "response": answer.answer,
         "tool_calls": ["category_analysis"],
         "messages": [],
         "scratchpad": scratchpad or [],
@@ -137,8 +148,7 @@ async def test_chat_response_confidence_reflects_agent_score(async_client):
 
 @pytest.mark.asyncio
 async def test_chat_response_no_confidence_defaults_to_1(async_client):
-    result = _mock_result()
-    result["confidence_score"] = None
+    result = _mock_result(confidence=1.0)
     with patch("api.routers.agent.ArthaAgent") as MockAgent:
         MockAgent.return_value.chat = AsyncMock(return_value=result)
         resp = await async_client.post(
@@ -151,14 +161,16 @@ async def test_chat_response_no_confidence_defaults_to_1(async_client):
 
 
 @pytest.mark.asyncio
-async def test_chat_response_reasoning_steps_populated_from_scratchpad(async_client):
-    """scratchpad extracted by agent.py must flow through to reasoning_steps in the response."""
-    scratchpad = [
-        {"thought": "Need to check groceries spend.", "action": "category_analysis", "observation": "₹5,000"},
-        {"thought": "Have the answer.", "final_answer": "You spent ₹5,000."},
+async def test_chat_response_reasoning_steps_populated_from_agent_answer(async_client):
+    """agent_answer.reasoning_steps must flow through to reasoning_steps in the response."""
+    steps = [
+        "Thought: Need to check groceries spend. | Action: category_analysis | Observation: ₹5,000",
+        "Thought: Have the answer. | Final Answer: You spent ₹5,000.",
     ]
     with patch("api.routers.agent.ArthaAgent") as MockAgent:
-        MockAgent.return_value.chat = AsyncMock(return_value=_mock_result(0.9, scratchpad=scratchpad))
+        MockAgent.return_value.chat = AsyncMock(
+            return_value=_mock_result(0.9, reasoning_steps=steps)
+        )
         resp = await async_client.post(
             "/agent/chat",
             json={"owner_id": OWNER_ID, "message": "How much on groceries?"},

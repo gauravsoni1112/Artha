@@ -136,29 +136,25 @@ async def _handle_phase3_agent(body: ChatRequest, session: AsyncSession) -> Chat
         log.error("agent.chat.phase3.error", error=str(exc), owner_id=str(body.owner_id))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
 
-    structured = AgentAnswer.from_agent_result(
-        response=result["response"],
-        scratchpad=result.get("scratchpad"),
-        confidence_score=result.get("confidence_score"),
-    )
+    agent_answer: AgentAnswer = result["agent_answer"]
 
     log.info(
         "agent.chat.phase3.complete",
         owner_id=str(body.owner_id),
         tool_calls=result["tool_calls"],
-        confidence=structured.confidence,
+        confidence=agent_answer.confidence,
     )
 
     return ChatResponse(
         owner_id=body.owner_id,
         message=body.message,
-        response=result["response"],
+        response=agent_answer.answer,
         tool_calls=result["tool_calls"],
         session_id=uuid.UUID(result["session_id"]),
         run_id=uuid.UUID(result["run_id"]),
-        confidence=structured.confidence,
-        reasoning_steps=structured.reasoning_steps,
-        supporting_data=structured.supporting_data,
+        confidence=agent_answer.confidence,
+        reasoning_steps=agent_answer.reasoning_steps,
+        supporting_data=agent_answer.supporting_data,
         routed_to=None,
     )
 

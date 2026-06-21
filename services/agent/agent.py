@@ -37,6 +37,7 @@ from services.agent.config import LLMConfig
 from services.agent.context import compact_messages
 from services.agent.planner import Plan, PlannerNode
 from services.agent.reflection import ReflectionNode
+from services.agent.schemas import AgentAnswer
 from services.agent.tools.registry import build_langchain_tools
 
 log = structlog.get_logger(__name__)
@@ -168,6 +169,7 @@ class ArthaAgent:
             reflection_notes: str | None
             needs_rerun: bool
             reflect_count: int
+            agent_answer: AgentAnswer | None  # structured final output from executor_loop
 
         # ── planner node ──────────────────────────────────────────────────
         async def planner_node(state: PlanState) -> dict:
@@ -192,25 +194,37 @@ class ArthaAgent:
                 observations.append(f"[Step: {step}]\n{obs}")
                 log.debug("executor_loop.step_done", step=step, obs_len=len(obs))
 
-            # If multi-step, synthesise a final answer from all observations
+            synth_llm = llm.with_structured_output(AgentAnswer)
+            original_question = original_messages[-1].content if original_messages else ""
+
+            # If multi-step, synthesise a structured final answer from all observations
             if len(plan.steps) > 1:
                 synthesis_prompt = (
                     "Based on the following step-by-step observations, "
-                    "provide a concise final answer to the original question.\n\n"
+                    "provide a structured final answer to the original question.\n\n"
                     + "\n\n".join(observations)
-                    + f"\n\nOriginal question: {original_messages[-1].content if original_messages else ''}"
+                    + f"\n\nOriginal question: {original_question}"
+                    "\n\nFor reasoning_steps, summarise each step observation concisely. "
+                    "For supporting_data, extract key figures (tool name, amounts, categories, periods)."
                 )
-                synth_state = {"messages": [HumanMessage(content=synthesis_prompt)]}
-                synth_result = await inner_graph.ainvoke(
-                    synth_state,
-                    config={"recursion_limit": self._recursion_limit},
-                )
-                final_messages = list(original_messages) + synth_result["messages"]
             else:
-                # Single step — use inner graph messages directly
-                final_messages = list(original_messages) + step_result["messages"]  # type: ignore[possibly-undefined]
+                # Single step — synthesise directly from the step observation
+                last = step_result["messages"][-1]  # type: ignore[possibly-undefined]
+                obs = last.content if hasattr(last, "content") else str(last)
+                observations.append(f"[Step: {plan.steps[0]}]\n{obs}")
+                synthesis_prompt = (
+                    f"Provide a structured final answer.\n\nObservation: {obs}"
+                    f"\n\nOriginal question: {original_question}"
+                    "\n\nFor supporting_data, extract key figures from the observation."
+                )
 
-            return {"messages": final_messages, "step_observations": observations}
+            agent_answer: AgentAnswer = await synth_llm.ainvoke(
+                [HumanMessage(content=synthesis_prompt)]
+            )
+            final_messages = list(original_messages) + [AIMessage(content=agent_answer.answer)]
+            log.debug("executor_loop.synthesis_done", answer_len=len(agent_answer.answer))
+
+            return {"messages": final_messages, "step_observations": observations, "agent_answer": agent_answer}
 
         # ── reflection node ───────────────────────────────────────────────
         async def reflect_node(state: PlanState) -> dict:
@@ -276,6 +290,7 @@ class ArthaAgent:
                 "reflection_notes": None,
                 "needs_rerun": False,
                 "reflect_count": 0,
+                "agent_answer": None,
             }
 
             result = await graph.ainvoke(
@@ -289,8 +304,12 @@ class ArthaAgent:
             confidence_score: float | None = result.get("confidence_score")
             reflection_notes: str | None = result.get("reflection_notes")
 
-            final_msg = messages[-1]
-            response_text = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+            # Apply reflection confidence to the structured answer
+            agent_answer: AgentAnswer = result.get("agent_answer") or AgentAnswer(answer="", confidence=1.0)
+            if confidence_score is not None:
+                agent_answer = agent_answer.model_copy(update={"confidence": confidence_score})
+
+            response_text = agent_answer.answer
 
             tool_calls = [
                 tc["name"]
@@ -327,7 +346,8 @@ class ArthaAgent:
         )
 
         return {
-            "response": response_text,
+            "agent_answer": agent_answer,                  # primary structured output
+            "response": agent_answer.answer,               # backward compat
             "tool_calls": tool_calls,
             "messages": messages_trace,
             "scratchpad": scratchpad,
@@ -335,7 +355,7 @@ class ArthaAgent:
             "run_id": run_id,
             "plan": plan,
             "step_observations": step_observations,
-            "confidence_score": confidence_score,
+            "confidence_score": agent_answer.confidence,
             "reflection_notes": reflection_notes,
         }
 
